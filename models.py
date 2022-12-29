@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Callable
+from typing import Optional
 
 import equinox as eqx
 import jax
@@ -9,9 +9,10 @@ import jax.numpy as jnp
 import jax.random as jrandom
 import optax
 from equinox import Module, static_field
+from jax import custom_jvp
 from jaxtyping import Array
 
-from jax import custom_jvp
+import pickle
 
 
 @custom_jvp
@@ -99,7 +100,7 @@ class RNNCell(Module):
     ):
         # new = jnn.tanh(self.weight_ih @ input + self.weight_hh @ hidden + self.bias)
         # fn = lambda w_hh, h: event_fn(jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
-        fn = lambda w_hh, h: event_fn(jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
+        fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
         new = fn(self.weight_hh, hidden)
         jac = jax.jacfwd(fn, argnums=(0, 1))
         bar_M, J = jac(self.weight_hh, hidden)
@@ -181,7 +182,7 @@ def train(
 
 def main(
         dataset_size=10000,
-        seq_len=11,
+        seq_len=100,
         batch_size=32,
         hidden_size=16,
         seed=5678,
@@ -234,6 +235,9 @@ def main(
     # num_correct = jnp.sum((pred_ys > 0.5) == ys)
     # final_accuracy = (num_correct / dataset_size).item()
     # print(f"final_accuracy={final_accuracy}")
+
+    with open(f'sparse-data-{seq_len}-no-event.p', 'wb') as f:
+        pickle.dump(dict(Ms=Ms, bar_Ms=bar_Ms, Js=Js, states=states), f)
 
 
 # train()  # All right, let's run the code.
