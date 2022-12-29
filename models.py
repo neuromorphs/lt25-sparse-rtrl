@@ -11,6 +11,24 @@ import optax
 from equinox import Module, static_field
 from jaxtyping import Array
 
+from jax import custom_jvp
+
+
+@custom_jvp
+def event_fn(x):
+    return jnp.heaviside(x, x)
+
+
+@event_fn.defjvp
+def f_jvp(primals, tangents):
+    dampening_factor = 0.7
+    pseudo_derivative_width = 1.
+    x, = primals
+    x_dot, = tangents
+    primal_out = event_fn(x)
+    tangent_out = dampening_factor * jnp.maximum(1 - pseudo_derivative_width * jnp.abs(x), 0.) * x_dot
+    return primal_out, tangent_out
+
 
 def dataloader(arrays, batch_size, *, key):
     dataset_size = arrays[0].shape[0]
@@ -80,12 +98,13 @@ class RNNCell(Module):
             self, input: Array, hidden: Array, *, key: Optional["jax.random.PRNGKey"] = None
     ):
         # new = jnn.tanh(self.weight_ih @ input + self.weight_hh @ hidden + self.bias)
-        fn = lambda w_hh, h: jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias)
+        # fn = lambda w_hh, h: event_fn(jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
+        fn = lambda w_hh, h: event_fn(jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
         new = fn(self.weight_hh, hidden)
         jac = jax.jacfwd(fn, argnums=(0, 1))
-        j1, j2 = jac(self.weight_hh, hidden)
+        bar_M, J = jac(self.weight_hh, hidden)
         # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
-        return new, (new, j1, j2)
+        return new, (new, bar_M, J)
 
 
 class RNN(eqx.Module):
@@ -203,10 +222,13 @@ def main(
 
     print("Ms.shape: ", Ms.shape)
 
+    print("Mean value of states: ", jnp.mean(states))
     print("Percent zeros in states: ", jnp.mean(states == 0.))
-    print("Percent zeros in Ms: ", jnp.mean(Ms == 0.))
-    print("Percent zeros in Js: ", jnp.mean(Js == 0.))
-    print("Percent zeros in bar_Ms: ", jnp.mean(bar_Ms == 0.))
+
+    print("Percent zeros in Js: ", jnp.mean(jnp.isclose(Js, 0.)))
+    print("Percent zeros in bar_Ms: ", jnp.mean(jnp.isclose(bar_Ms, 0.)))
+
+    print("Percent zeros in Ms: ", jnp.mean(jnp.isclose(Ms, 0.)))
 
     # pred_ys, _ = jax.vmap(model)(xs)
     # num_correct = jnp.sum((pred_ys > 0.5) == ys)
