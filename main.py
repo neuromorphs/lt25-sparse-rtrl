@@ -13,6 +13,7 @@ from models import RNN
 
 def train(
         dataset_size=10000,
+        seq_len=100,
         batch_size=32,
         learning_rate=3e-3,
         steps=1000,
@@ -20,7 +21,7 @@ def train(
         seed=5678,
 ):
     data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
-    xs, ys = get_data(dataset_size, key=data_key)
+    xs, ys = get_data(dataset_size, seq_len, key=data_key)
     iter_data = dataloader((xs, ys), batch_size, key=loader_key)
 
     model = RNN(in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
@@ -44,11 +45,11 @@ def train(
     opt_state = optim.init(model)
     for step, (x, y) in zip(range(steps), iter_data):
         loss, model, opt_state, outs = make_step(model, x, y, opt_state)
-        print(outs)
+        # print(outs)
         loss = loss.item()
         print(f"step={step}, loss={loss}")
 
-    pred_ys = jax.vmap(model)(xs)
+    pred_ys, _ = jax.vmap(model)(xs)
     num_correct = jnp.sum((pred_ys > 0.5) == ys)
     final_accuracy = (num_correct / dataset_size).item()
     print(f"final_accuracy={final_accuracy}")
@@ -74,7 +75,9 @@ def main(
         return -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y)), outs
 
     x, y = next(iter_data)
-    loss, (states, bar_Ms, Js) = compute_loss_and_outputs(model, x, y)
+    # loss, (states, bar_Ms, Js) = compute_loss_and_outputs(model, x, y)
+    loss, (new_c, new_o, new_i, (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi)) = compute_loss_and_outputs(model, x, y)
+    states, Js, bar_Ms = new_c * new_o, Jc, bar_Mc
     print("Shape states & bar_Ms & Js: ", states.shape, bar_Ms.shape, Js.shape)
     # print(Js[:, 0])
     loss = loss.item()
@@ -115,5 +118,5 @@ def main(
 
 
 if __name__ == '__main__':
-    # train()  # All right, let's run the code.
-    main()  # All right, let's run the code.
+    train()  # All right, let's run the code.
+    # main()  # All right, let's run the code.
