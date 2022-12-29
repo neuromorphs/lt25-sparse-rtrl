@@ -26,7 +26,7 @@ print(np.min(Js[b]), np.max(Js[b]))
 
 # Add traces, one for each slider step
 for t in np.arange(0, nt):
-    fig.add_trace(go.Heatmap(z=Js[b, t], zmin=-0.2, zmax=0.2))
+    fig.add_trace(go.Heatmap(z=Js[b, t], zmin=-0.2, zmax=0.2, colorscale='Rainbow'))
 
 # Make 10th trace visible
 fig.data[1].visible = True

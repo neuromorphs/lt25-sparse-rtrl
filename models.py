@@ -23,11 +23,11 @@ def event_fn(x):
 @event_fn.defjvp
 def f_jvp(primals, tangents):
     dampening_factor = 0.7
-    pseudo_derivative_width = 1.
+    pseudo_derivative_width = 0.5
     x, = primals
     x_dot, = tangents
     primal_out = event_fn(x)
-    tangent_out = dampening_factor * jnp.maximum(1 - pseudo_derivative_width * jnp.abs(x), 0.) * x_dot
+    tangent_out = x_dot * dampening_factor * jnp.maximum(1. -  jnp.abs(x)/pseudo_derivative_width, 0.)
     return primal_out, tangent_out
 
 
@@ -99,11 +99,14 @@ class RNNCell(Module):
             self, input: Array, hidden: Array, *, key: Optional["jax.random.PRNGKey"] = None
     ):
         # new = jnn.tanh(self.weight_ih @ input + self.weight_hh @ hidden + self.bias)
-        # fn = lambda w_hh, h: event_fn(jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
-        fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
-        new = fn(self.weight_hh, hidden)
+        fn = lambda h, w_hh: event_fn(jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
+
+        # fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
+        new = fn(hidden, self.weight_hh)
+
         jac = jax.jacfwd(fn, argnums=(0, 1))
-        bar_M, J = jac(self.weight_hh, hidden)
+        J, bar_M = jac(hidden, self.weight_hh)
+
         # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
         return new, (new, bar_M, J)
 
@@ -236,9 +239,10 @@ def main(
     # final_accuracy = (num_correct / dataset_size).item()
     # print(f"final_accuracy={final_accuracy}")
 
-    with open(f'sparse-data-{seq_len}-no-event.p', 'wb') as f:
+    with open(f'sparse-data-{seq_len}.p', 'wb') as f:
         pickle.dump(dict(Ms=Ms, bar_Ms=bar_Ms, Js=Js, states=states), f)
 
 
-# train()  # All right, let's run the code.
-main()  # All right, let's run the code.
+if __name__ == '__main__':
+    # train()  # All right, let's run the code.
+    main()  # All right, let's run the code.
