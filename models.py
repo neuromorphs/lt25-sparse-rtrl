@@ -1,134 +1,218 @@
-import functools
-from functools import partial  # pylint: disable=g-importing-member
-from typing import Any, Callable, Optional, Tuple
+import math
+from typing import Optional, Callable
 
+import equinox as eqx
 import jax
+import jax.lax as lax
+import jax.nn as jnn
+import jax.numpy as jnp
+import jax.random as jrandom
 import optax
-from flax import linen as nn
-from flax.linen.activation import tanh
-from flax.linen.initializers import orthogonal
-from flax.linen.initializers import zeros
-from flax.linen.linear import Dense
-from flax.linen.linear import default_kernel_init
-from flax.linen.recurrent import RNNCellBase
-from jax import numpy as jnp, value_and_grad, jacfwd
-from jax import random
-
-PRNGKey = Any
-Shape = Tuple[int, ...]
-Dtype = Any  # this could be a real type?
-Array = Any
+from equinox import Module, static_field
+from jaxtyping import Array
 
 
-class RNNCell(RNNCellBase):
-    activation_fn: Callable[..., Any] = tanh
-    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
-    recurrent_kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = orthogonal()
-    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = zeros
-    dtype: Optional[Dtype] = None
-    param_dtype: Dtype = jnp.float32
-
-    @nn.compact
-    def __call__(self, carry, inputs):
-        h = carry
-        n_hidden_features = h.shape[-1]
-        # input and recurrent layers are summed so only one needs a bias.
-        dense_h = partial(Dense,
-                          features=n_hidden_features,
-                          use_bias=True,
-                          kernel_init=self.recurrent_kernel_init,
-                          bias_init=self.bias_init,
-                          dtype=self.dtype,
-                          param_dtype=self.param_dtype)
-        dense_i = partial(Dense,
-                          features=n_hidden_features,
-                          use_bias=False,
-                          kernel_init=self.kernel_init,
-                          dtype=self.dtype,
-                          param_dtype=self.param_dtype)
-        new_h = self.activation_fn(dense_i(name='ig')(inputs) + dense_h(name='hg')(h))
-        return new_h, new_h
-
-    @staticmethod
-    def initialize_carry(rng, batch_dims, size, init_fn=zeros):
-        mem_shape = batch_dims + (size,)
-        return init_fn(rng, mem_shape)
+def dataloader(arrays, batch_size, *, key):
+    dataset_size = arrays[0].shape[0]
+    assert all(array.shape[0] == dataset_size for array in arrays)
+    indices = jnp.arange(dataset_size)
+    while True:
+        perm = jrandom.permutation(key, indices)
+        (key,) = jrandom.split(key, 1)
+        start = 0
+        end = batch_size
+        while end < dataset_size:
+            batch_perm = perm[start:end]
+            yield tuple(array[batch_perm] for array in arrays)
+            start = end
+            end = start + batch_size
 
 
-class SimpleRNN(nn.Module):
-    """A simple unidirectional RNN."""
+def get_data(dataset_size, seq_len, *, key):
+    t = jnp.linspace(0, 2 * math.pi, seq_len)
+    offset = jrandom.uniform(key, (dataset_size, 1), minval=0, maxval=2 * math.pi)
+    x1 = jnp.sin(t + offset) / (1 + t)
+    x2 = jnp.cos(t + offset) / (1 + t)
+    y = jnp.ones((dataset_size, 1))
 
-    @functools.partial(
-        nn.transforms.scan,
-        variable_broadcast='params',
-        in_axes=1, out_axes=1,
-        split_rngs={'params': False})
-    @nn.compact
-    def __call__(self, carry, x):
-        rnn = RNNCell()
-        fn = lambda rnn, carry, x: rnn(carry, x)
-        new_carry, new_out = fn(rnn, carry, x)
-        J = jacfwd(fn, argnums=(0, 1), has_aux=False)(rnn, carry, x)
-        return new_carry, (new_out, J)
+    half_dataset_size = dataset_size // 2
+    x1 = x1.at[:half_dataset_size].multiply(-1)
+    y = y.at[:half_dataset_size].set(0)
+    x = jnp.stack([x1, x2], axis=-1)
 
-    @staticmethod
-    def initialize_carry(batch_dims, hidden_size):
-        # Use fixed random key since default state init fn is just zeros.
-        return RNNCell.initialize_carry(
-            jax.random.PRNGKey(0), batch_dims, hidden_size)
+    return x, y
 
 
-class SimpleRNNClassifier(nn.Module):
-    output_size: int
+class RNNCell(Module):
+    weight_ih: Array
+    weight_hh: Array
+    bias: Optional[Array]
+    input_size: int = static_field()
+    hidden_size: int = static_field()
 
-    @nn.compact
-    def __call__(self, carry, x):
-        rnn_state, (y, J) = SimpleRNN()(carry, x)
-        logits = nn.Dense(features=self.output_size)(y)
-        # Sample the predicted token using a categorical distribution over the
-        # logits.
-        categorical_rng = self.make_rng('rnn')
-        predicted_token = jax.random.categorical(categorical_rng, logits)
-        # Convert to one-hot encoding.
-        prediction = jax.nn.one_hot(
-            predicted_token, self.output_size, dtype=jnp.float32)
-        return logits, prediction, J
+    def __init__(
+            self,
+            input_size: int,
+            hidden_size: int,
+            *,
+            key: Optional["jax.random.PRNGKey"],
+            **kwargs
+    ):
+        super().__init__(**kwargs)
 
-    @staticmethod
-    def initialize_carry(batch_dims, hidden_size):
-        return SimpleRNN.initialize_carry(batch_dims, hidden_size)
+        ihkey, hhkey, bkey = jrandom.split(key, 3)
+        lim = math.sqrt(1 / hidden_size)
 
+        self.weight_ih = jrandom.uniform(
+            ihkey, (hidden_size, input_size), minval=-lim, maxval=lim
+        )
+        self.weight_hh = jrandom.uniform(
+            hhkey, (hidden_size, hidden_size), minval=-lim, maxval=lim
+        )
+        self.bias = jrandom.uniform(
+            bkey, (hidden_size,), minval=-lim, maxval=lim
+        )
 
-if __name__ == '__main__':
-    seq_len, batch_size, in_size, hidden_size, output_size = 11, 7, 3, 5, 2
-    key_1, key_2, key_3 = random.split(random.PRNGKey(0), 3)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
 
-    xs = random.uniform(key_1, (batch_size, seq_len, in_size))
-    ys = random.randint(key_1, (batch_size, 1), 0, 2)
-
-
-    def cross_entropy_loss(*, logits, labels):
-        labels_onehot = jax.nn.one_hot(labels, num_classes=output_size)
-        return optax.softmax_cross_entropy(logits=logits, labels=labels_onehot).mean()
-
-
-    def compute_metrics(*, logits, labels):
-        loss = cross_entropy_loss(logits=logits, labels=labels)
-        accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
-        metrics = {
-            'loss': loss,
-            'accuracy': accuracy,
-        }
-        return metrics
+    def __call__(
+            self, input: Array, hidden: Array, *, key: Optional["jax.random.PRNGKey"] = None
+    ):
+        # new = jnn.tanh(self.weight_ih @ input + self.weight_hh @ hidden + self.bias)
+        fn = lambda w_hh, h: jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias)
+        new = fn(self.weight_hh, hidden)
+        jac = jax.jacfwd(fn, argnums=(0, 1))
+        j1, j2 = jac(self.weight_hh, hidden)
+        # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
+        return new, (new, j1, j2)
 
 
-    model = SimpleRNNClassifier(output_size=output_size)
-    init_carry = SimpleRNNClassifier.initialize_carry((batch_size,), hidden_size)
-    params = model.init({'params': key_2, 'rnn': key_3}, init_carry, xs)
-    logits, prediction, J = model.apply(params, init_carry, xs, rngs={'rnn': key_3})
+class RNN(eqx.Module):
+    hidden_size: int
+    cell: eqx.Module
+    linear: eqx.nn.Linear
+    bias: jnp.ndarray
 
-    loss = cross_entropy_loss(logits=logits[:, -1, ...], labels=ys)
-    metrics = compute_metrics(logits=logits[:, -1, ...], labels=ys)
+    # init_fn: Callable
+    # apply_fn: Callable
 
-    print(metrics)
-    # print(J)
+    def __init__(self, in_size, out_size, hidden_size, *, key):
+        ckey, lkey = jrandom.split(key)
+        self.hidden_size = hidden_size
+        # self.cell = eqx.nn.GRUCell(in_size, hidden_size, key=ckey)
+        self.cell = RNNCell(in_size, hidden_size, key=ckey)
+        self.linear = eqx.nn.Linear(hidden_size, out_size, use_bias=False, key=lkey)
+        self.bias = jnp.zeros(out_size)
+
+    def __call__(self, input):
+        hidden = jnp.zeros((self.hidden_size,))
+
+        def f(carry, inp):
+            carry, out = self.cell(inp, carry)
+            return carry, out
+
+        final_state, outs = lax.scan(f, hidden, input)
+        # sigmoid because we're performing binary classification
+        return jax.nn.sigmoid(self.linear(final_state) + self.bias), outs
+
+
+def train(
+        dataset_size=10000,
+        batch_size=32,
+        learning_rate=3e-3,
+        steps=1000,
+        hidden_size=16,
+        seed=5678,
+):
+    data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
+    xs, ys = get_data(dataset_size, key=data_key)
+    iter_data = dataloader((xs, ys), batch_size, key=loader_key)
+
+    model = RNN(in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+
+    @eqx.filter_value_and_grad(has_aux=True)
+    def compute_loss_and_outputs(model, x, y):
+        pred_y, outs = jax.vmap(model)(x)
+        # Trains with respect to binary cross-entropy
+        return -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y)), outs
+
+    # Important for efficiency whenever you use JAX: wrap everything into a single JIT
+    # region.
+    @eqx.filter_jit
+    def make_step(model, x, y, opt_state):
+        (loss, outs), grads = compute_loss_and_outputs(model, x, y)
+        updates, opt_state = optim.update(grads, opt_state)
+        model = eqx.apply_updates(model, updates)
+        return loss, model, opt_state, outs
+
+    optim = optax.adam(learning_rate)
+    opt_state = optim.init(model)
+    for step, (x, y) in zip(range(steps), iter_data):
+        loss, model, opt_state, outs = make_step(model, x, y, opt_state)
+        print(outs)
+        loss = loss.item()
+        print(f"step={step}, loss={loss}")
+
+    pred_ys = jax.vmap(model)(xs)
+    num_correct = jnp.sum((pred_ys > 0.5) == ys)
+    final_accuracy = (num_correct / dataset_size).item()
+    print(f"final_accuracy={final_accuracy}")
+
+
+def main(
+        dataset_size=10000,
+        seq_len=11,
+        batch_size=32,
+        hidden_size=16,
+        seed=5678,
+):
+    data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
+    xs, ys = get_data(dataset_size, seq_len=seq_len, key=data_key)
+    iter_data = dataloader((xs, ys), batch_size, key=loader_key)
+
+    model = RNN(in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+
+    @eqx.filter_jit
+    def compute_loss_and_outputs(model, x, y):
+        pred_y, outs = jax.vmap(model)(x)
+        # Trains with respect to binary cross-entropy
+        return -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y)), outs
+
+    x, y = next(iter_data)
+    loss, (states, bar_Ms, Js) = compute_loss_and_outputs(model, x, y)
+    print("Shape states & bar_Ms & Js: ", states.shape, bar_Ms.shape, Js.shape)
+    # print(Js[:, 0])
+    loss = loss.item()
+    print(f"loss={loss}")
+
+    def compute_influence_matrix(carry, inp):
+        M_prev = carry
+        J, bar_M = inp
+        M = jnp.einsum('bkl,blij->bkij', J, M_prev) + bar_M
+        return M, M
+
+    Js_tr = jnp.transpose(Js, (1, 0, 2, 3))
+    bar_Ms_tr = jnp.transpose(bar_Ms, (1, 0, 2, 3, 4))
+
+    print("Transpose shape bar_Ms & Js: ", bar_Ms_tr.shape, Js_tr.shape)
+
+    _, Ms_tr = lax.scan(compute_influence_matrix, jnp.zeros_like(bar_Ms[:, 0]), (Js_tr, bar_Ms_tr))
+
+    Ms = jnp.transpose(Ms_tr, (1, 0, 2, 3, 4))
+
+    print("Ms.shape: ", Ms.shape)
+
+    print("Percent zeros in states: ", jnp.mean(states == 0.))
+    print("Percent zeros in Ms: ", jnp.mean(Ms == 0.))
+    print("Percent zeros in Js: ", jnp.mean(Js == 0.))
+    print("Percent zeros in bar_Ms: ", jnp.mean(bar_Ms == 0.))
+
+    # pred_ys, _ = jax.vmap(model)(xs)
+    # num_correct = jnp.sum((pred_ys > 0.5) == ys)
+    # final_accuracy = (num_correct / dataset_size).item()
+    # print(f"final_accuracy={final_accuracy}")
+
+
+# train()  # All right, let's run the code.
+main()  # All right, let's run the code.
