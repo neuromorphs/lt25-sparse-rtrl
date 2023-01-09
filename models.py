@@ -1,4 +1,5 @@
 import math
+from enum import Enum
 from typing import Optional, Tuple
 
 import equinox as eqx
@@ -66,6 +67,7 @@ class RNNCell(Module):
     ):
         # new = jnn.tanh(self.weight_ih @ input + self.weight_hh @ hidden + self.bias)
         fn = lambda h, w_hh: event_fn(jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
+        # fn = lambda h, w_hh: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
 
         # fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
         new = fn(hidden, self.weight_hh)
@@ -166,6 +168,46 @@ class EGRUCell(Module):
         return jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,)), jnp.zeros((3 * self.hidden_size,))
 
 
+class CellType(Enum):
+    RNN = 0
+    EqxGRU = 1
+    EGRU = 2
+
+
+class EqxRNN(eqx.Module):
+    hidden_size: int
+    cell: eqx.Module
+    linear: eqx.nn.Linear
+    bias: jnp.ndarray
+
+    # init_fn: Callable
+    # apply_fn: Callable
+
+    def __init__(self, cell_type, in_size, out_size, hidden_size, *, key):
+        ckey, lkey = jrandom.split(key)
+
+        self.hidden_size = hidden_size
+
+        if cell_type == CellType.EqxGRU:
+            self.cell = eqx.nn.GRUCell(in_size, hidden_size, key=ckey)
+        else:
+            raise RuntimeError(f"Unknown cell type {cell_type}")
+
+        self.linear = eqx.nn.Linear(hidden_size, out_size, use_bias=False, key=lkey)
+        self.bias = jnp.zeros(out_size)
+
+    def __call__(self, input):
+        hidden = jnp.zeros((self.hidden_size,))
+
+        def f(carry, inp):
+            return self.cell(inp, carry), None
+
+        final_state, outs = lax.scan(f, hidden, input)
+
+        # sigmoid because we're performing binary classification
+        return jax.nn.sigmoid(self.linear(final_state) + self.bias), outs
+
+
 class RNN(eqx.Module):
     hidden_size: int
     cell: eqx.Module
@@ -175,12 +217,18 @@ class RNN(eqx.Module):
     # init_fn: Callable
     # apply_fn: Callable
 
-    def __init__(self, in_size, out_size, hidden_size, *, key):
+    def __init__(self, cell_type, in_size, out_size, hidden_size, *, key):
         ckey, lkey = jrandom.split(key)
+
         self.hidden_size = hidden_size
-        # self.cell = eqx.nn.GRUCell(in_size, hidden_size, key=ckey)
-        # self.cell = RNNCell(in_size, hidden_size, key=ckey)
-        self.cell = EGRUCell(in_size, hidden_size, key=ckey)
+
+        if cell_type == CellType.RNN:
+            self.cell = RNNCell(in_size, hidden_size, key=ckey)
+        elif cell_type == CellType.EGRU:
+            self.cell = EGRUCell(in_size, hidden_size, key=ckey)
+        else:
+            raise RuntimeError(f"Unknown cell type {cell_type}")
+
         self.linear = eqx.nn.Linear(hidden_size, out_size, use_bias=False, key=lkey)
         self.bias = jnp.zeros(out_size)
 
@@ -191,7 +239,11 @@ class RNN(eqx.Module):
             carry, out = self.cell(inp, carry)
             return carry, out
 
-        # final_state, outs = lax.scan(f, hidden, input)
-        (c, o, i), outs = lax.scan(f, hidden, input)
+        if isinstance(self.cell, RNNCell):
+            final_state, outs = lax.scan(f, hidden, input)
+        elif isinstance(self.cell, EGRUCell):
+            (c, o, i), outs = lax.scan(f, hidden, input)
+            final_state = c * o
+
         # sigmoid because we're performing binary classification
-        return jax.nn.sigmoid(self.linear(c * o) + self.bias), outs
+        return jax.nn.sigmoid(self.linear(final_state) + self.bias), outs

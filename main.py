@@ -8,23 +8,28 @@ import jax.random as jrandom
 import optax
 
 from data import get_data, dataloader
-from models import RNN
+from models import EqxRNN, RNN, CellType
 
 
 def train(
         dataset_size=10000,
-        seq_len=100,
+        seq_len=16,
         batch_size=32,
         learning_rate=3e-3,
-        steps=1000,
+        steps=200,
         hidden_size=16,
         seed=5678,
+        # cell_type=CellType.EqxGRU,
+        cell_type=CellType.EGRU,
 ):
     data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
     xs, ys = get_data(dataset_size, seq_len, key=data_key)
     iter_data = dataloader((xs, ys), batch_size, key=loader_key)
 
-    model = RNN(in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+    if cell_type in [CellType.EqxGRU]:
+        model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+    else:
+        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
 
     @eqx.filter_value_and_grad(has_aux=True)
     def compute_loss_and_outputs(model, x, y):
