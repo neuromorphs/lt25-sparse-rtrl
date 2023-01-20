@@ -35,6 +35,7 @@ class RNNCell(Module):
     bias: Optional[Array]
     input_size: int = static_field()
     hidden_size: int = static_field()
+    output_jac: bool = static_field()
 
     def __init__(
             self,
@@ -42,6 +43,7 @@ class RNNCell(Module):
             hidden_size: int,
             *,
             key: Optional["jax.random.PRNGKey"],
+            output_jac=True,
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -61,6 +63,7 @@ class RNNCell(Module):
 
         self.input_size = input_size
         self.hidden_size = hidden_size
+        self.output_jac = output_jac
 
     def __call__(
             self, input: Array, hidden: Array, *, key: Optional["jax.random.PRNGKey"] = None
@@ -72,8 +75,11 @@ class RNNCell(Module):
         # fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
         new = fn(hidden, self.weight_hh)
 
-        jac = jax.jacfwd(fn, argnums=(0, 1))
-        J, bar_M = jac(hidden, self.weight_hh)
+        if self.output_jac:
+            jac = jax.jacfwd(fn, argnums=(0, 1))
+            J, bar_M = jac(hidden, self.weight_hh)
+        else:
+            J, bar_M = None, None
 
         # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
         return new, (new, bar_M, J)
@@ -90,6 +96,7 @@ class EGRUCell(Module):
     input_size: int = static_field()
     hidden_size: int = static_field()
     alpha: float = 0.001
+    output_jac: bool = static_field()
 
     def __init__(
             self,
@@ -97,6 +104,7 @@ class EGRUCell(Module):
             hidden_size: int,
             *,
             key: Optional["jax.random.PRNGKey"],
+            output_jac=True,
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -120,6 +128,7 @@ class EGRUCell(Module):
 
         self.input_size = input_size
         self.hidden_size = hidden_size
+        self.output_jac = output_jac
 
     def __call__(
             self, input: Array, state: Tuple[Array, Array, Array], *, key: Optional["jax.random.PRNGKey"] = None
@@ -156,10 +165,15 @@ class EGRUCell(Module):
         # fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
         # new_h, new_c, new_o, new_i = fn(hidden, self)
 
-        jac = jax.jacfwd(fn, argnums=(0, 1), has_aux=True)
+        if self.output_jac:
+            jac = jax.jacfwd(fn, argnums=(0, 1), has_aux=True)
+        else: 
+            jac = fn
+
         res, (new_h, new_c, new_o, new_i) = jac(hidden, self)
 
-        # res = (None, None), (None, None), (None, None)
+        if not self.output_jac:
+            res = (None, None), (None, None), (None, None), (None, None)
 
         (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi) = res
 
@@ -220,15 +234,23 @@ class RNN(eqx.Module):
     # init_fn: Callable
     # apply_fn: Callable
 
-    def __init__(self, cell_type, in_size, out_size, hidden_size, *, key):
+    def __init__(self, 
+                cell_type, 
+                 in_size: int, 
+                 out_size: int, 
+                 hidden_size: int, 
+                *, 
+                key: Optional["jax.random.PRNGKey"],
+                **kwargs
+                 ):
         ckey, lkey = jrandom.split(key)
 
         self.hidden_size = hidden_size
 
         if cell_type == CellType.RNN:
-            self.cell = RNNCell(in_size, hidden_size, key=ckey)
+            self.cell = RNNCell(in_size, hidden_size, key=ckey, **kwargs)
         elif cell_type == CellType.EGRU:
-            self.cell = EGRUCell(in_size, hidden_size, key=ckey)
+            self.cell = EGRUCell(in_size, hidden_size, key=ckey, **kwargs)
         else:
             raise RuntimeError(f"Unknown cell type {cell_type}")
 
