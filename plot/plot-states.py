@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from jax import lax
 
-with open('../sparse-data-100.p', 'rb') as f:
+with open('../sparse-data-egru-100.p', 'rb') as f:
     obj = pickle.load(f)
 
 Ms = obj['Ms']

@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from jax import lax
 
-with open('../sparse-data-100.p', 'rb') as f:
+with open('../sparse-data-egru-100.p', 'rb') as f:
     obj = pickle.load(f)
 
 Ms = obj['Ms']
@@ -21,10 +21,10 @@ nh = Ms.shape[2]
 states_flat = states.reshape((nb * nt, nh))
 states_sparsities = lax.map(lambda M: jnp.mean(jnp.isclose(M, 0)), states_flat).reshape((nb, nt, 1))
 
-bar_Ms_flat = bar_Ms.reshape((nb * nt, nh, nh, nh))
+bar_Ms_flat = bar_Ms.reshape((nb * nt, nh, 3 * nh, nh))
 bar_M_sparsities = lax.map(lambda M: jnp.mean(jnp.isclose(M, 0)), bar_Ms_flat).reshape((nb, nt, 1))
 
-Ms_flat = Ms.reshape((nb * nt, nh, nh, nh))
+Ms_flat = Ms.reshape((nb * nt, nh, 3 * nh, nh))
 M_sparsities = lax.map(lambda M: jnp.mean(jnp.isclose(M, 0)), Ms_flat).reshape((nb, nt, 1))
 
 prop_cycle = plt.rcParams['axes.prop_cycle']

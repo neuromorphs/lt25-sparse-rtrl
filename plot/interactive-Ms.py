@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 # with open('sparse-data.p', 'wb') as f:
 #     pickle.dump(dict(Ms=Ms, bar_Ms=bar_Ms, Js=Js, states=states), f)
 
-with open('../sparse-data-100.p', 'rb') as f:
+with open('../sparse-data-egru-100.p', 'rb') as f:
     obj = pickle.load(f)
 
 Ms = np.array(obj['Ms'])

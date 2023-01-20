@@ -21,7 +21,7 @@ def event_fn(x):
 @event_fn.defjvp
 def f_jvp(primals, tangents):
     dampening_factor = 0.7
-    pseudo_derivative_width = 0.5
+    pseudo_derivative_width = 1.
     x, = primals
     x_dot, = tangents
     primal_out = event_fn(x)
@@ -125,24 +125,24 @@ class EGRUCell(Module):
             self, input: Array, state: Tuple[Array, Array, Array], *, key: Optional["jax.random.PRNGKey"] = None
     ):
         thr = jnn.sigmoid(self.threshold)
-        c, o, i = state
+        h, c, o, i = state
         hidden = o * c
         c_reset = c - (o * thr)
 
         iu, ir, ic = jnp.split(i, 3, -1)
 
-        def fn(hh, w_hh):
-            lin_x = self.weight_ih @ input
-            lin_h = w_hh @ hh
+        def fn(hh, model):
+            lin_x = model.weight_ih @ input
+            lin_h = model.weight_hh @ hh
             xu, xr, xc = jnp.split(lin_x, 3, -1)
             hu, hr, hc = jnp.split(lin_h, 3, -1)
-            bu, br, bc = jnp.split(self.bias, 3)
+            bu, br, bc = jnp.split(model.bias, 3)
 
-            new_iu = self.alpha * iu + (1 - self.alpha) * (xu + hu + bu)
+            new_iu = model.alpha * iu + (1 - model.alpha) * (xu + hu + bu)
             new_u = jnn.sigmoid(new_iu)
-            new_ir = self.alpha * ir + (1 - self.alpha) * (xr + hr + br)
+            new_ir = model.alpha * ir + (1 - model.alpha) * (xr + hr + br)
             new_r = jnn.sigmoid(new_ir)
-            new_ic = self.alpha * ic + (1 - self.alpha) * (xc + new_r * hc + bc)
+            new_ic = model.alpha * ic + (1 - model.alpha) * (xc + new_r * hc + bc)
             new_z = jnn.tanh(new_ic)
 
             new_i = jnp.concatenate([new_iu, new_ir, new_ic], -1)
@@ -151,27 +151,32 @@ class EGRUCell(Module):
             new_o = event_fn(new_c - thr)
             # new_h = new_o * new_c
 
-            return new_c, new_o, new_i
+            return (new_c * new_o, new_c, new_o, new_i), (new_c * new_o, new_c, new_o, new_i)
 
         # fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
-        new_c, new_o, new_i = fn(hidden, self.weight_hh)
+        # new_h, new_c, new_o, new_i = fn(hidden, self)
 
-        jac = jax.jacfwd(fn, argnums=(0, 1))
-        # res = jac(hidden, self.weight_hh)
-        res = (None, None), (None, None), (None, None)
-        (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi) = res
+        jac = jax.jacfwd(fn, argnums=(0, 1), has_aux=True)
+        res, (new_h, new_c, new_o, new_i) = jac(hidden, self)
+
+        # res = (None, None), (None, None), (None, None)
+
+        (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi) = res
+
+        # import ipdb
+        # ipdb.set_trace()
 
         # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
-        return (new_c, new_o, new_i), (new_c, new_o, new_i, (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi))
+        return (new_h, new_c, new_o, new_i), (new_h, new_c, new_o, new_i, (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi))
 
     def init_carry(self):
-        return jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,)), jnp.zeros((3 * self.hidden_size,))
+        return jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,)), jnp.zeros((3 * self.hidden_size,))
 
 
 class CellType(Enum):
-    RNN = 0
-    EqxGRU = 1
-    EGRU = 2
+    RNN = 'rnn'
+    EqxGRU = 'eqxgru'
+    EGRU = 'egru'
 
 
 class EqxRNN(eqx.Module):
@@ -211,8 +216,6 @@ class EqxRNN(eqx.Module):
 class RNN(eqx.Module):
     hidden_size: int
     cell: eqx.Module
-    linear: eqx.nn.Linear
-    bias: jnp.ndarray
 
     # init_fn: Callable
     # apply_fn: Callable
@@ -229,9 +232,6 @@ class RNN(eqx.Module):
         else:
             raise RuntimeError(f"Unknown cell type {cell_type}")
 
-        self.linear = eqx.nn.Linear(hidden_size, out_size, use_bias=False, key=lkey)
-        self.bias = jnp.zeros(out_size)
-
     def __call__(self, input):
         hidden = self.cell.init_carry()
 
@@ -242,8 +242,8 @@ class RNN(eqx.Module):
         if isinstance(self.cell, RNNCell):
             final_state, outs = lax.scan(f, hidden, input)
         elif isinstance(self.cell, EGRUCell):
-            (c, o, i), outs = lax.scan(f, hidden, input)
-            final_state = c * o
+            (h, c, o, i), outs = lax.scan(f, hidden, input)
+            final_state = h
 
-        # sigmoid because we're performing binary classification
-        return jax.nn.sigmoid(self.linear(final_state) + self.bias), outs
+        return final_state, outs
+
