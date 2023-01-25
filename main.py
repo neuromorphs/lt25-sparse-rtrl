@@ -1,4 +1,5 @@
 import pickle
+from functools import partial
 
 import equinox as eqx
 import jax
@@ -19,12 +20,18 @@ def loss_fn(y, pred_y):
 
 
 @eqx.filter_jit
-def compute_loss_and_outputs(model, linear, x, y):
-    final_state, outs = jax.vmap(model)(x)
-    pred_y = jax.vmap(linear)(final_state)
-    # Trains with respect to binary cross-entropy
+def compute_loss_and_outputs(model, x, y):
+    pred_y, outs = jax.vmap(model)(x)
+    # jax.debug.print("{pred_y}", pred_y=pred_y)
+    ## Trains with respect to binary cross-entropy
     loss, _ = loss_fn(y, pred_y)
+    # jax.debug.print("{loss}", loss=loss)
     return loss, outs
+
+
+@eqx.filter_value_and_grad(has_aux=True)
+def compute_loss_and_grads(model, x, y):
+    return compute_loss_and_outputs(model, x, y)
 
 
 @eqx.filter_jit
@@ -129,40 +136,137 @@ def train(
         cell_type=CellType.EGRU,
 ):
     data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
+
     xs, ys = get_data(dataset_size, seq_len, key=data_key)
     iter_data = dataloader((xs, ys), batch_size, key=loader_key)
 
     if cell_type in [CellType.EqxGRU]:
         model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
     else:
-        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key, output_jac=False)
 
-    @eqx.filter_value_and_grad(has_aux=True)
-    def compute_loss_and_outputs(model, x, y):
-        final_state, outs = jax.vmap(model)(x)
-        pred_y, _ = lin(final_state)
-        loss, _ = loss_fn(pred_y)
-        # Trains with respect to binary cross-entropy
-        return loss, outs
+    full_model = model
 
     # Important for efficiency whenever you use JAX: wrap everything into a single JIT
     # region.
     @eqx.filter_jit
-    def make_step(model, x, y, opt_state):
-        (loss, outs), grads = compute_loss_and_outputs(model, x, y)
+    def make_step(full_model, x, y, opt_state):
+        (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
         updates, opt_state = optim.update(grads, opt_state)
-        model = eqx.apply_updates(model, updates)
-        return loss, model, opt_state, outs
+        full_model = eqx.apply_updates(full_model, updates)
+        return loss, full_model, opt_state, outs
 
     optim = optax.adam(learning_rate)
-    opt_state = optim.init(model)
+    opt_state = optim.init(full_model)
     for step, (x, y) in zip(range(steps), iter_data):
-        loss, model, opt_state, outs = make_step(model, x, y, opt_state)
+        loss, full_model, opt_state, outs = make_step(full_model, x, y, opt_state)
         # print(outs)
         loss = loss.item()
         print(f"step={step}, loss={loss}")
 
-    pred_ys, _ = jax.vmap(model)(xs)
+    pred_ys, outs = jax.vmap(full_model)(xs)
+
+    num_correct = jnp.sum((pred_ys > 0.5) == ys)
+    final_accuracy = (num_correct / dataset_size).item()
+    print(f"final_accuracy={final_accuracy}")
+
+
+def train_fwd_implicit(
+        dataset_size=10000,
+        seq_len=17,
+        batch_size=32,
+        learning_rate=3e-3,
+        steps=600,
+        hidden_size=16,
+        seed=5678,
+        # cell_type=CellType.EqxGRU,
+        cell_type=CellType.EGRU,
+):
+    data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
+
+    xs, ys = get_data(dataset_size, seq_len, key=data_key)
+    iter_data = dataloader((xs, ys), batch_size, key=loader_key)
+
+    if cell_type in [CellType.EqxGRU]:
+        model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+    else:
+        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key, output_jac=False)
+
+    full_model = model
+
+    # @eqx.filter_jit
+    # def compute_loss_and_outputs(model, x, y):
+    #     pred_y, outs = jax.vmap(model)(x)
+    #     # jax.debug.print("{pred_y}", pred_y=pred_y)
+    #     ## Trains with respect to binary cross-entropy
+    #     loss, _ = loss_fn(y, pred_y)
+    #     # jax.debug.print("{loss}", loss=loss)
+    #     return loss, outs
+
+    # Important for efficiency whenever you use JAX: wrap everything into a single JIT
+    # region.
+    @eqx.filter_jit
+    def make_step(full_model, x, y, opt_state):
+
+        # lmm = lambda mm: mm(x), mm(x)
+
+        ## full_model: x -> pred_y, outs
+        ## For EGRU, outs = (h, c, o, i, (Jh, barMh), (Jc, barMc), (Jo, barMo), (Ji, barMi))
+        ## For eqx.GRU, outs = (h)
+        # @eqx.filter_grad
+        @eqx.filter_jit
+        def fma(params, static, xx):
+            mm = eqx.combine(params, static)
+            pred_y, outs = mm(xx)
+            return (pred_y, outs), (pred_y, outs)
+
+        # @eqx.filter_grad
+        @eqx.filter_jit
+        def jj(mm, xx):
+            params, static = eqx.partition(mm, eqx.is_array)
+            return jax.jacfwd(fma, has_aux=True)(params, static, xx)
+
+        @eqx.filter_jit
+        def ls(mm, hht, y):
+            pred_y = jax.nn.sigmoid(mm.linear(hht))
+            loss, _ = loss_fn(y, pred_y)
+            return loss, loss
+
+        ## Jouts is M at (t-1)
+        (_Jpred_y, Jouts), (_pred_y, outs) = jax.vmap(partial(jj, full_model))(x)
+
+        jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
+        jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
+        jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
+
+        final_state = outs[0][:, -1]
+        Jloss, loss = jax.vmap(partial(jax.jacfwd(ls, has_aux=True, argnums=1), full_model))(final_state, y)
+
+        # FIXME: Jloss is barc, Jouts[0].cell.weight_hh is M (similarly for other params). Now need to multiply to
+        # calculate grads. Then apply grads.
+
+        import ipdb
+        ipdb.set_trace()
+
+        # (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
+        loss, outs = compute_loss_and_outputs(full_model, x, y)
+        ## For now, assume only last timestep contributes to loss. TODO fix later.
+        (new_h, new_c, new_o, new_i, jacs) = outs
+        # (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi) = jacs
+        updates, opt_state = optim.update(grads, opt_state)
+        full_model = eqx.apply_updates(full_model, updates)
+        return loss, full_model, opt_state, outs
+
+    optim = optax.adam(learning_rate)
+    opt_state = optim.init(full_model)
+    for step, (x, y) in zip(range(steps), iter_data):
+        loss, full_model, opt_state, outs = make_step(full_model, x, y, opt_state)
+        # print(outs)
+        loss = loss.item()
+        print(f"step={step}, loss={loss}")
+
+    pred_ys, outs = jax.vmap(full_model)(xs)
+
     num_correct = jnp.sum((pred_ys > 0.5) == ys)
     final_accuracy = (num_correct / dataset_size).item()
     print(f"final_accuracy={final_accuracy}")
@@ -177,6 +281,7 @@ def main(
         # cell_type=CellType.EqxGRU,
         cell_type=CellType.EGRU,
 ):
+    # raise RuntimeError("Doesn't work with internal linear layer yet")
     data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
     xs, ys = get_data(dataset_size, seq_len=seq_len, key=data_key)
     iter_data = dataloader((xs, ys), batch_size, key=loader_key)
@@ -186,16 +291,18 @@ def main(
     else:
         model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
 
-    linear = eqx.nn.Linear(out_features=1, in_features=hidden_size, key=model_key)
+    # linear = eqx.nn.Linear(out_features=1, in_features=hidden_size, key=model_key)
+
+    full_model = model
 
     x, y = next(iter_data)
     if cell_type in [CellType.EGRU]:
         loss, (new_h, new_c, new_o, new_i, (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi)) = \
-            compute_loss_and_outputs(model, linear, x, y)
+            compute_loss_and_outputs(full_model, x, y)
         states, Js, bar_Ms = new_c * new_o, Jc, bar_Mc
         print("EGRU")
     elif cell_type in [CellType.RNN]:
-        loss, (states, bar_Ms, Js) = compute_loss_and_outputs(model, x, y)
+        loss, (states, bar_Ms, Js) = compute_loss_and_outputs(full_model, x, y)
 
     print("Shape bar_Ms & Js: ", jax.tree_util.tree_map(lambda bar_ms: bar_ms.shape, bar_Ms), Js.shape)
 
@@ -240,6 +347,7 @@ if __name__ == '__main__':
 
     # with launch_ipdb_on_exception():
     #     train_fwd()
-    # train()  # All right, let's run the code.
     with launch_ipdb_on_exception():
-        main()  # All right, let's run the code.
+        # main()  # All right, let's run the code.
+        # train()  # All right, let's run the code.
+        train_fwd_implicit()  # All right, let's run the code.

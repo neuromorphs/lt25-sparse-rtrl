@@ -197,7 +197,6 @@ class EqxRNN(eqx.Module):
     hidden_size: int
     cell: eqx.Module
     linear: eqx.nn.Linear
-    bias: jnp.ndarray
 
     # init_fn: Callable
     # apply_fn: Callable
@@ -212,24 +211,27 @@ class EqxRNN(eqx.Module):
         else:
             raise RuntimeError(f"Unknown cell type {cell_type}")
 
-        self.linear = eqx.nn.Linear(hidden_size, out_size, use_bias=False, key=lkey)
-        self.bias = jnp.zeros(out_size)
+        self.linear = eqx.nn.Linear(hidden_size, out_size, key=lkey)
 
     def __call__(self, input):
         hidden = jnp.zeros((self.hidden_size,))
 
         def f(carry, inp):
-            return self.cell(inp, carry), None
+            c = self.cell(inp, carry)
+            return c, c
 
         final_state, outs = lax.scan(f, hidden, input)
 
         # sigmoid because we're performing binary classification
-        return jax.nn.sigmoid(self.linear(final_state) + self.bias), outs
+        return jax.nn.sigmoid(self.linear(final_state)), outs
 
 
 class RNN(eqx.Module):
     hidden_size: int
     cell: eqx.Module
+
+    ## NOTE: Wan't to keep linear layer here so that the RNN class is always compatible with eqx.* RNNs
+    linear: eqx.nn.Linear
 
     # init_fn: Callable
     # apply_fn: Callable
@@ -254,6 +256,8 @@ class RNN(eqx.Module):
         else:
             raise RuntimeError(f"Unknown cell type {cell_type}")
 
+        self.linear = eqx.nn.Linear(hidden_size, out_size, key=lkey)
+
     def __call__(self, input):
         hidden = self.cell.init_carry()
 
@@ -267,5 +271,6 @@ class RNN(eqx.Module):
             (h, c, o, i), outs = lax.scan(f, hidden, input)
             final_state = h
 
-        return final_state, outs
+        pred = jax.nn.sigmoid(self.linear(final_state))
+        return pred, outs
 
