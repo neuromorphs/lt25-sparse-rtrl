@@ -8,6 +8,8 @@ import jax.numpy as jnp
 import jax.random as jrandom
 import optax
 
+import ipdb
+
 from data import get_data, dataloader
 from models import EqxRNN, RNN, CellType
 
@@ -227,35 +229,68 @@ def train_fwd_implicit(
             return jax.jacfwd(fma, has_aux=True)(params, static, xx)
 
         @eqx.filter_jit
+        def lin(linear, hht):
+            res = linear(hht)
+            return res, res
+
+        @eqx.filter_jit
         def ls(mm, hht, y):
-            pred_y = jax.nn.sigmoid(mm.linear(hht))
-            loss, _ = loss_fn(y, pred_y)
-            return loss, loss
+            # lg, pred_y = jax.jacfwd(lin, has_aux=True)(lambda x: jax.nn.sigmoid(mm.linear(x)), hht)
+            def _loss(lin):
+                pred_y = jax.nn.sigmoid(lin(hht))
+                l, _ = loss_fn(y, pred_y)
+                return l, l
+            lg, loss = jax.jacfwd(_loss, has_aux=True)(mm.linear)
+            # ipdb.set_trace()
+            return loss, (loss, lg)
 
         ## Jouts is M at (t-1)
         (_Jpred_y, Jouts), (_pred_y, outs) = jax.vmap(partial(jj, full_model))(x)
 
-        jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
-        jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
-        jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
+        # jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
+        # jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
+        # jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
         final_state = outs[0][:, -1]
-        Jloss, loss = jax.vmap(partial(jax.jacfwd(ls, has_aux=True, argnums=1), full_model))(final_state, y)
+        Jloss, (loss, lg) = jax.vmap(partial(jax.jacfwd(ls, has_aux=True, argnums=1), full_model))(final_state, y)
 
-        # FIXME: Jloss is barc, Jouts[0].cell.weight_hh is M (similarly for other params). Now need to multiply to
-        # calculate grads. Then apply grads.
+        def calc_grad(M):
+            barC = Jloss
+            bhgrads = jnp.einsum('bh,bh...->b...', barC, M[:, -1])
+            return jnp.mean(bhgrads, axis=(0, ))
 
-        import ipdb
-        ipdb.set_trace()
+        cell_grads = jax.tree_util.tree_map(calc_grad, Jouts[0].cell)
+        lin_grads = jax.tree_util.tree_map(partial(jnp.mean, axis=(0, )), lg)
 
-        # (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
-        loss, outs = compute_loss_and_outputs(full_model, x, y)
-        ## For now, assume only last timestep contributes to loss. TODO fix later.
-        (new_h, new_c, new_o, new_i, jacs) = outs
-        # (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi) = jacs
+        ## Test if grads are correct (Yes they are!!)
+        (loss, outs), grads_ = compute_loss_and_grads(full_model, x, y)
+
+        # jax.debug.print("Are the hh grads correct?: {a}", a=jnp.isclose(cell_grads.weight_hh, grads_.cell.weight_hh).all())
+        # jax.debug.print("Are the lin grads correct?: {a}", a=jnp.isclose(lin_grads.weight, grads_.linear.weight).all())
+        # jax.debug.print("Grads: {a}, {b}", a=grads.weight_hh, b=grads_.cell.weight_hh)
+
+        wcg = eqx.tree_at(lambda m: m.cell, full_model, replace=cell_grads)
+        grads = eqx.tree_at(lambda m: m.linear, wcg, replace=lin_grads)
+
+        # jax.debug.print("Are the hh grads correct?: {a}", a=jnp.isclose(grads.cell.weight_hh, grads_.cell.weight_hh).all())
+        # jax.debug.print("Are the lin grads correct?: {a}", a=jnp.isclose(grads.linear.weight, grads_.linear.weight).all())
+
         updates, opt_state = optim.update(grads, opt_state)
         full_model = eqx.apply_updates(full_model, updates)
+        # ipdb.set_trace()
+
         return loss, full_model, opt_state, outs
+
+        # return
+
+        # # (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
+        # loss, outs = compute_loss_and_outputs(full_model, x, y)
+        # ## For now, assume only last timestep contributes to loss. TODO fix later.
+        # (new_h, new_c, new_o, new_i, jacs) = outs
+        # # (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi) = jacs
+        # updates, opt_state = optim.update(grads, opt_state)
+        # full_model = eqx.apply_updates(full_model, updates)
+        # return loss, full_model, opt_state, outs
 
     optim = optax.adam(learning_rate)
     opt_state = optim.init(full_model)
