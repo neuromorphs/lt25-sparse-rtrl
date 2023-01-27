@@ -229,11 +229,6 @@ def train_fwd_implicit(
             return jax.jacfwd(fma, has_aux=True)(params, static, xx)
 
         @eqx.filter_jit
-        def lin(linear, hht):
-            res = linear(hht)
-            return res, res
-
-        @eqx.filter_jit
         def ls(mm, hht, y):
             # lg, pred_y = jax.jacfwd(lin, has_aux=True)(lambda x: jax.nn.sigmoid(mm.linear(x)), hht)
             def _loss(lin):
@@ -247,9 +242,9 @@ def train_fwd_implicit(
         ## Jouts is M at (t-1)
         (_Jpred_y, Jouts), (_pred_y, outs) = jax.vmap(partial(jj, full_model))(x)
 
-        # jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
-        # jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
-        # jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
+        jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
+        jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
+        jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
         final_state = outs[0][:, -1]
         Jloss, (loss, lg) = jax.vmap(partial(jax.jacfwd(ls, has_aux=True, argnums=1), full_model))(final_state, y)
@@ -263,7 +258,8 @@ def train_fwd_implicit(
         lin_grads = jax.tree_util.tree_map(partial(jnp.mean, axis=(0, )), lg)
 
         ## Test if grads are correct (Yes they are!!)
-        (loss, outs), grads_ = compute_loss_and_grads(full_model, x, y)
+        loss = jnp.mean(loss)
+        # (loss, outs), grads_ = compute_loss_and_grads(full_model, x, y)
 
         # jax.debug.print("Are the hh grads correct?: {a}", a=jnp.isclose(cell_grads.weight_hh, grads_.cell.weight_hh).all())
         # jax.debug.print("Are the lin grads correct?: {a}", a=jnp.isclose(lin_grads.weight, grads_.linear.weight).all())
