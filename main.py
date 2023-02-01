@@ -172,7 +172,6 @@ def train(
     final_accuracy = (num_correct / dataset_size).item()
     print(f"final_accuracy={final_accuracy}")
 
-
 def train_fwd_implicit(
         dataset_size=10000,
         seq_len=17,
@@ -242,9 +241,9 @@ def train_fwd_implicit(
         ## Jouts is M at (t-1)
         (_Jpred_y, Jouts), (_pred_y, outs) = jax.vmap(partial(jj, full_model))(x)
 
-        jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
-        jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
-        jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
+        # jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
+        # jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
+        # jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
         final_state = outs[0][:, -1]
         Jloss, (loss, lg) = jax.vmap(partial(jax.jacfwd(ls, has_aux=True, argnums=1), full_model))(final_state, y)

@@ -158,9 +158,10 @@ class EGRUCell(Module):
             new_c = (1 - new_u) * c_reset + new_u * new_z
 
             new_o = event_fn(new_c - thr)
-            # new_h = new_o * new_c
+            new_h = new_o * new_c
+            # new_h = new_o
 
-            return (new_c * new_o, new_c, new_o, new_i), (new_c * new_o, new_c, new_o, new_i)
+            return (new_h, new_c, new_o, new_i), (new_h, new_c, new_o, new_i)
 
         # fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
         # new_h, new_c, new_o, new_i = fn(hidden, self)
