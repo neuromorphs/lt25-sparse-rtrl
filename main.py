@@ -203,7 +203,7 @@ def train_fwd_implicit(
     if cell_type in [CellType.EqxGRU]:
         model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
     else:
-        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key, output_jac=False)
+        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key, weight_sparsity=weight_sparsity)
 
     full_model = model
 
@@ -255,9 +255,9 @@ def train_fwd_implicit(
         (_Jpred_y, Jouts), (_pred_y, outs) = jax.vmap(partial(jj, full_model))(x)
         # ipdb.set_trace()
 
-        jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
-        jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
-        jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
+        # jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
+        # jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
+        # jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
         time_state_sparsity = jnp.mean(outs[0] == 0., axis=1)
         time_J_sparsity = jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.), axis=1)
@@ -320,7 +320,8 @@ def train_fwd_implicit(
         loss = loss.item()
         wandb.log(dict(train=dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
                                   mean_state_sparsity=jnp.mean(sparsity[0]), mean_M_sparsity=jnp.mean(sparsity[1]))))
-        print(f"step={step}, loss={loss}")
+        if step % 10 == 0:
+            print(f"step={step}, loss={loss}")
         if step % 100 == 0:
             pred_ys, outs = jax.vmap(full_model)(xs_val)
 

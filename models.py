@@ -106,7 +106,7 @@ class EGRUCell(Module):
             *,
             key: Optional["jax.random.PRNGKey"],
             weight_sparsity=0.,
-            output_jac=True,
+            output_jac=False,
             **kwargs
     ):
         super().__init__(**kwargs)
