@@ -344,7 +344,9 @@ def train_fwd_implicit(
         # print(outs)
         loss = loss.item()
         data = dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
-                                    mean_state_sparsity=jnp.mean(sparsity[0]), mean_M_sparsity=jnp.mean(sparsity[1]))
+                                    mean_state_sparsity=jnp.mean(sparsity[0]), 
+                                    mean_M_sparsity=jnp.mean(sparsity[1]),
+                                    mean_sq_M_sparsity=jnp.mean(sparsity[1]**2))
         record_dict('train', data)
         if use_wandb:
             wandb.log(dict(train=data))
@@ -363,6 +365,7 @@ def train_fwd_implicit(
             print(f"step={step}, validation_accuracy={acc}")
             if jnp.mean(jnp.array(validation_accs[-3:])) > 0.999:
                 print("=================== Reached required accuracy")
+                break
 
     pred_ys, outs = jax.vmap(full_model)(xs_test)
 
