@@ -105,6 +105,7 @@ class EGRUCell(Module):
             hidden_size: int,
             *,
             key: Optional["jax.random.PRNGKey"],
+            weight_sparsity=0.,
             output_jac=True,
             **kwargs
     ):
@@ -121,7 +122,7 @@ class EGRUCell(Module):
         self.weight_hh = jrandom.uniform(
             hhwkey, (3 * hidden_size, hidden_size), minval=-lim, maxval=lim
         )
-        s = 0.6
+        s = weight_sparsity
         self.mask_hh = jrandom.choice(
             hhmkey, jnp.array([True, False]), (3 * hidden_size, hidden_size), p=jnp.array([1 - s, s])
         )

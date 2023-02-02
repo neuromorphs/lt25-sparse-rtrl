@@ -10,9 +10,10 @@ import optax
 
 import ipdb
 
+import wandb
+
 from data import get_data, dataloader
 from models import EqxRNN, RNN, CellType
-
 
 @eqx.filter_jit
 def loss_fn(y, pred_y):
@@ -86,8 +87,8 @@ def train_fwd_explicit(
 
         print("Transpose shape bar_Ms & Js: ", jax.tree_util.tree_map(lambda bar_ms_tr: bar_ms_tr.shape, bar_Ms_tr), Js_tr.shape)
 
-        import ipdb
-        ipdb.set_trace()
+        # import ipdb
+        # ipdb.set_trace()
 
         ## FIXME: Need to do map tree
         _, Ms_tr = lax.scan(compute_influence_matrix, jnp.zeros_like(bar_Ms[:, 0]), (Js_tr, bar_Ms_tr))
@@ -102,8 +103,8 @@ def train_fwd_explicit(
         jac = jax.jacfwd(fn, argnums=(0,), has_aux=True)
         (bar_c, ), loss = jac(final_state)
 
-        import ipdb
-        ipdb.set_trace()
+        # import ipdb
+        # ipdb.set_trace()
 
         nb = Ms.shape[0]
         nh = Ms.shape[2]
@@ -180,9 +181,13 @@ def train_fwd_implicit(
         steps=6000,
         hidden_size=16,
         seed=5678,
+        weight_sparsity=0.,
         # cell_type=CellType.EqxGRU,
         cell_type=CellType.EGRU,
 ):
+    wandb.config = dict(seq_len=seq_len, batch_size=batch_size, learning_rate=learning_rate, steps=steps,
+                        hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity)
+
     data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
 
     xs, ys = get_data(dataset_size, seq_len, key=data_key_train)
@@ -208,6 +213,7 @@ def train_fwd_implicit(
     #     loss, _ = loss_fn(y, pred_y)
     #     # jax.debug.print("{loss}", loss=loss)
     #     return loss, outs
+
 
     # Important for efficiency whenever you use JAX: wrap everything into a single JIT
     # region.
@@ -245,10 +251,14 @@ def train_fwd_implicit(
 
         ## Jouts is M at (t-1)
         (_Jpred_y, Jouts), (_pred_y, outs) = jax.vmap(partial(jj, full_model))(x)
+        # ipdb.set_trace()
 
         jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
         jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
         jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
+
+        time_state_sparsity = jnp.mean(outs[0], axis=1)
+        time_J_sparsity = jnp.mean(Jouts[0].cell.weight_hh, axis=1)
 
         if cell_type in [CellType.EqxGRU]:
             final_state = outs[:, -1]
@@ -287,7 +297,7 @@ def train_fwd_implicit(
         full_model = eqx.apply_updates(full_model, updates)
         # ipdb.set_trace()
 
-        return loss, full_model, opt_state, outs
+        return loss, full_model, opt_state, outs, (time_state_sparsity, time_J_sparsity)
 
         # return
 
@@ -303,15 +313,18 @@ def train_fwd_implicit(
     optim = optax.adam(learning_rate)
     opt_state = optim.init(full_model)
     for step, (x, y) in zip(range(steps), iter_data):
-        loss, full_model, opt_state, outs = make_step(full_model, x, y, opt_state)
+        loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state)
         # print(outs)
         loss = loss.item()
+        wandb.log(dict(train=dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
+                                  mean_state_sparsity=jnp.mean(sparsity[0]), mean_M_sparsity=jnp.mean(sparsity[1]))))
         print(f"step={step}, loss={loss}")
         if step % 100 == 0:
             pred_ys, outs = jax.vmap(full_model)(xs_val)
 
             num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
             acc = (num_correct / len(xs_val)).item()
+            wandb.log(dict(validation=dict(step=step, accuracy=acc)))
             print(f"step={step}, validation_accuracy={acc}")
             if acc > 0.99:
                 break
@@ -320,6 +333,7 @@ def train_fwd_implicit(
 
     num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
     final_accuracy = (num_correct / len(xs_test)).item()
+    wandb.log(dict(test=dict(accuracy=final_accuracy)))
     print(f"test_accuracy={final_accuracy}")
 
 
@@ -396,11 +410,14 @@ def main(
 
 
 if __name__ == '__main__':
+    wandb.init(project="sparse-rtrl", entity="anands")
+
     from ipdb import launch_ipdb_on_exception
 
     # with launch_ipdb_on_exception():
-    #     train_fwd()
-    with launch_ipdb_on_exception():
-        # main()  # All right, let's run the code.
-        # train()  # All right, let's run the code.
-        train_fwd_implicit()  # All right, let's run the code.
+    #     # train_fwd()
+    #     # main()  # All right, let's run the code.
+    #     # train()  # All right, let's run the code.
+    #     train_fwd_implicit()  # All right, let's run the code.
+
+    train_fwd_implicit()  # All right, let's run the code.
