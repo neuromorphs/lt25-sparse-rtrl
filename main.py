@@ -1,5 +1,6 @@
 import pickle
 from functools import partial
+import argparse
 
 import equinox as eqx
 import jax
@@ -185,8 +186,9 @@ def train_fwd_implicit(
         # cell_type=CellType.EqxGRU,
         cell_type=CellType.EGRU,
 ):
-    wandb.config = dict(seq_len=seq_len, batch_size=batch_size, learning_rate=learning_rate, steps=steps,
-                        hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity)
+    wandb.init(project="sparse-rtrl", entity="anands", 
+               config=dict(seq_len=seq_len, batch_size=batch_size, learning_rate=learning_rate, steps=steps,
+                        hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity))
 
     data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
 
@@ -257,8 +259,8 @@ def train_fwd_implicit(
         jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
         jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
-        time_state_sparsity = jnp.mean(outs[0], axis=1)
-        time_J_sparsity = jnp.mean(Jouts[0].cell.weight_hh, axis=1)
+        time_state_sparsity = jnp.mean(outs[0] == 0., axis=1)
+        time_J_sparsity = jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.), axis=1)
 
         if cell_type in [CellType.EqxGRU]:
             final_state = outs[:, -1]
@@ -410,7 +412,9 @@ def main(
 
 
 if __name__ == '__main__':
-    wandb.init(project="sparse-rtrl", entity="anands")
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument('--weight-sparsity', type=float, default=0.0)
+    args = argparser.parse_args()
 
     from ipdb import launch_ipdb_on_exception
 
@@ -420,4 +424,4 @@ if __name__ == '__main__':
     #     # train()  # All right, let's run the code.
     #     train_fwd_implicit()  # All right, let's run the code.
 
-    train_fwd_implicit()  # All right, let's run the code.
+    train_fwd_implicit(weight_sparsity=args.weight_sparsity)  # All right, let's run the code.
