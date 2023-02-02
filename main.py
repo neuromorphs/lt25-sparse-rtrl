@@ -179,7 +179,7 @@ def train_fwd_implicit(
         seq_len=17,
         batch_size=32,
         learning_rate=3e-3,
-        steps=6000,
+        steps=1700,
         hidden_size=16,
         seed=5678,
         weight_sparsity=0.,
@@ -319,6 +319,7 @@ def train_fwd_implicit(
 
     optim = optax.adam(learning_rate)
     opt_state = optim.init(full_model)
+    validation_accs = []
     for step, (x, y) in zip(range(steps), iter_data):
         loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state)
         # print(outs)
@@ -333,11 +334,12 @@ def train_fwd_implicit(
 
             num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
             acc = (num_correct / len(xs_val)).item()
+            validation_accs.append(acc)
             if use_wandb:
                 wandb.log(dict(validation=dict(step=step, accuracy=acc)))
             print(f"step={step}, validation_accuracy={acc}")
-            if acc > 0.99:
-                break
+            # if jnp.mean(jnp.array(validation_accs[-3:])) > 0.999:
+            #     break
 
     pred_ys, outs = jax.vmap(full_model)(xs_test)
 
