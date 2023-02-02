@@ -91,6 +91,7 @@ class RNNCell(Module):
 class EGRUCell(Module):
     weight_ih: Array
     weight_hh: Array
+    mask_hh: Array = static_field()
     threshold: Array
     bias: Optional[Array]
     input_size: int = static_field()
@@ -115,9 +116,16 @@ class EGRUCell(Module):
         self.weight_ih = jrandom.uniform(
             ihkey, (3 * hidden_size, input_size), minval=-lim, maxval=lim
         )
+
+        hhwkey, hhmkey = jrandom.split(hhkey, 2)
         self.weight_hh = jrandom.uniform(
-            hhkey, (3 * hidden_size, hidden_size), minval=-lim, maxval=lim
+            hhwkey, (3 * hidden_size, hidden_size), minval=-lim, maxval=lim
         )
+        s = 0.6
+        self.mask_hh = jrandom.choice(
+            hhmkey, jnp.array([True, False]), (3 * hidden_size, hidden_size), p=jnp.array([1 - s, s])
+        )
+
         self.bias = jrandom.uniform(
             bkey, (3 * hidden_size,), minval=-lim, maxval=lim
         )
@@ -142,7 +150,13 @@ class EGRUCell(Module):
 
         def fn(hh, model):
             lin_x = model.weight_ih @ input
-            lin_h = model.weight_hh @ hh
+
+            # w_hh = model.weight_hh[model.mask_hh]
+            w_hh = jnp.where(model.mask_hh, model.weight_hh, jnp.zeros_like(model.weight_hh))
+            # jax.debug.print("Percent zeros in w_hh: {m}", m=jnp.mean(jnp.isclose(w_hh, 0)))
+            # w_hh = model.weight_hh
+            lin_h = w_hh @ hh
+
             xu, xr, xc = jnp.split(lin_x, 3, -1)
             hu, hr, hc = jnp.split(lin_h, 3, -1)
             bu, br, bc = jnp.split(model.bias, 3)
@@ -195,7 +209,7 @@ class CellType(Enum):
 
 
 class EqxRNN(eqx.Module):
-    hidden_size: int
+    hidden_size: int = static_field()
     cell: eqx.Module
     linear: eqx.nn.Linear
 
@@ -228,7 +242,7 @@ class EqxRNN(eqx.Module):
 
 
 class RNN(eqx.Module):
-    hidden_size: int
+    hidden_size: int = static_field
     cell: eqx.Module
 
     ## NOTE: Wan't to keep linear layer here so that the RNN class is always compatible with eqx.* RNNs

@@ -177,16 +177,21 @@ def train_fwd_implicit(
         seq_len=17,
         batch_size=32,
         learning_rate=3e-3,
-        steps=600,
+        steps=6000,
         hidden_size=16,
         seed=5678,
         # cell_type=CellType.EqxGRU,
         cell_type=CellType.EGRU,
 ):
-    data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
+    data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
 
-    xs, ys = get_data(dataset_size, seq_len, key=data_key)
-    iter_data = dataloader((xs, ys), batch_size, key=loader_key)
+    xs, ys = get_data(dataset_size, seq_len, key=data_key_train)
+    idx = jax.random.randint(data_key_val, (dataset_size, ), 0, dataset_size)
+    xs, ys = xs.take(idx, axis=0), ys.take(idx, axis=0)
+    xs_train, xs_val, xs_test = xs[:int(dataset_size * 0.7)], xs[int(dataset_size * 0.7):int(dataset_size * 0.85)], xs[int(dataset_size * 0.85):]
+    ys_train, ys_val, ys_test = ys[:int(dataset_size * 0.7)], ys[int(dataset_size * 0.7):int(dataset_size * 0.85)], ys[int(dataset_size * 0.85):]
+    iter_data = dataloader((xs_train, ys_train), batch_size, key=loader_key)
+    # ipdb.set_trace()
 
     if cell_type in [CellType.EqxGRU]:
         model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
@@ -241,11 +246,14 @@ def train_fwd_implicit(
         ## Jouts is M at (t-1)
         (_Jpred_y, Jouts), (_pred_y, outs) = jax.vmap(partial(jj, full_model))(x)
 
-        # jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
-        # jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
-        # jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
+        jax.debug.print("Mean value of states: {m}", m=jnp.mean(outs[0]))
+        jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
+        jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
-        final_state = outs[0][:, -1]
+        if cell_type in [CellType.EqxGRU]:
+            final_state = outs[:, -1]
+        else:
+            final_state = outs[0][:, -1]
         Jloss, (loss, lg) = jax.vmap(partial(jax.jacfwd(ls, has_aux=True, argnums=1), full_model))(final_state, y)
 
         def calc_grad(M):
@@ -253,12 +261,15 @@ def train_fwd_implicit(
             bhgrads = jnp.einsum('bh,bh...->b...', barC, M[:, -1])
             return jnp.mean(bhgrads, axis=(0, ))
 
-        cell_grads = jax.tree_util.tree_map(calc_grad, Jouts[0].cell)
+        if cell_type in [CellType.EqxGRU]:
+            cell_grads = jax.tree_util.tree_map(calc_grad, Jouts.cell)
+        else:
+            cell_grads = jax.tree_util.tree_map(calc_grad, Jouts[0].cell)
         lin_grads = jax.tree_util.tree_map(partial(jnp.mean, axis=(0, )), lg)
 
         ## Test if grads are correct (Yes they are!!)
         loss = jnp.mean(loss)
-        # (loss, outs), grads_ = compute_loss_and_grads(full_model, x, y)
+
 
         # jax.debug.print("Are the hh grads correct?: {a}", a=jnp.isclose(cell_grads.weight_hh, grads_.cell.weight_hh).all())
         # jax.debug.print("Are the lin grads correct?: {a}", a=jnp.isclose(lin_grads.weight, grads_.linear.weight).all())
@@ -267,10 +278,12 @@ def train_fwd_implicit(
         wcg = eqx.tree_at(lambda m: m.cell, full_model, replace=cell_grads)
         grads = eqx.tree_at(lambda m: m.linear, wcg, replace=lin_grads)
 
+        # (loss, outs), grads_ = compute_loss_and_grads(full_model, x, y)
         # jax.debug.print("Are the hh grads correct?: {a}", a=jnp.isclose(grads.cell.weight_hh, grads_.cell.weight_hh).all())
         # jax.debug.print("Are the lin grads correct?: {a}", a=jnp.isclose(grads.linear.weight, grads_.linear.weight).all())
 
         updates, opt_state = optim.update(grads, opt_state)
+        # ipdb.set_trace()
         full_model = eqx.apply_updates(full_model, updates)
         # ipdb.set_trace()
 
@@ -294,12 +307,20 @@ def train_fwd_implicit(
         # print(outs)
         loss = loss.item()
         print(f"step={step}, loss={loss}")
+        if step % 100 == 0:
+            pred_ys, outs = jax.vmap(full_model)(xs_val)
 
-    pred_ys, outs = jax.vmap(full_model)(xs)
+            num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
+            acc = (num_correct / len(xs_val)).item()
+            print(f"step={step}, validation_accuracy={acc}")
+            if acc > 0.99:
+                break
 
-    num_correct = jnp.sum((pred_ys > 0.5) == ys)
-    final_accuracy = (num_correct / dataset_size).item()
-    print(f"final_accuracy={final_accuracy}")
+    pred_ys, outs = jax.vmap(full_model)(xs_test)
+
+    num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
+    final_accuracy = (num_correct / len(xs_test)).item()
+    print(f"test_accuracy={final_accuracy}")
 
 
 def main(
@@ -312,8 +333,10 @@ def main(
         cell_type=CellType.EGRU,
 ):
     # raise RuntimeError("Doesn't work with internal linear layer yet")
-    data_key, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 3)
-    xs, ys = get_data(dataset_size, seq_len=seq_len, key=data_key)
+    data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
+    xs, ys = get_data(dataset_size, seq_len=seq_len, key=data_key_train)
+    xs_val, ys_val = get_data(2500, seq_len=seq_len, key=data_key_val)
+    xs_test, ys_test = get_data(2500, seq_len=seq_len, key=data_key_test)
     iter_data = dataloader((xs, ys), batch_size, key=loader_key)
 
     if cell_type in [CellType.EqxGRU]:
