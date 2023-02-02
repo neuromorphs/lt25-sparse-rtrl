@@ -340,13 +340,20 @@ def train_fwd_implicit(
     optim = optax.adam(learning_rate)
     opt_state = optim.init(full_model)
     validation_accs = []
+    cum_mean_state_sparsity, cum_mean_M_sparsity = 0., 0.
     for step, (x, y) in zip(range(steps), iter_data):
         loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state)
         # print(outs)
         loss = loss.item()
+        mean_state_sparsity=jnp.mean(sparsity[0])
+        mean_M_sparsity=jnp.mean(sparsity[1])
+        cum_mean_state_sparsity += mean_state_sparsity
+        cum_mean_M_sparsity += mean_M_sparsity
         data = dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
-                                    mean_state_sparsity=jnp.mean(sparsity[0]), 
-                                    mean_M_sparsity=jnp.mean(sparsity[1]),
+                                    mean_state_sparsity=mean_state_sparsity,
+                                    mean_M_sparsity=mean_M_sparsity,
+                                    cum_mean_state_sparsity=cum_mean_state_sparsity,
+                                    cum_mean_M_sparsity=cum_mean_M_sparsity,
                                     mean_sq_M_sparsity=jnp.mean(sparsity[1]**2))
         if use_simmanager:
             record_dict('train', data)
@@ -368,7 +375,7 @@ def train_fwd_implicit(
             print(f"step={step}, validation_accuracy={acc}")
             if jnp.mean(jnp.array(validation_accs[-3:])) > 0.999:
                 print("=================== Reached required accuracy")
-                break
+                # break
 
     pred_ys, outs = jax.vmap(full_model)(xs_test)
 
