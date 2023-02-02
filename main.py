@@ -204,7 +204,8 @@ def train_fwd_implicit(
         disable_activity_sparsity=False,
         # cell_type=CellType.EqxGRU,
         cell_type=CellType.EGRU,
-        use_wandb=False
+        use_wandb=False,
+        use_simmanager=False
 ):
     print(f"Seed: {seed}")
     if use_wandb:
@@ -347,7 +348,8 @@ def train_fwd_implicit(
                                     mean_state_sparsity=jnp.mean(sparsity[0]), 
                                     mean_M_sparsity=jnp.mean(sparsity[1]),
                                     mean_sq_M_sparsity=jnp.mean(sparsity[1]**2))
-        record_dict('train', data)
+        if use_simmanager:
+            record_dict('train', data)
         if use_wandb:
             wandb.log(dict(train=data))
 
@@ -359,7 +361,8 @@ def train_fwd_implicit(
             num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
             acc = (num_correct / len(xs_val)).item()
             validation_accs.append(acc)
-            record_dict('validation', dict(step=step, accuracy=acc))
+            if use_simmanager:
+                record_dict('validation', dict(step=step, accuracy=acc))
             if use_wandb:
                 wandb.log(dict(validation=dict(step=step, accuracy=acc)))
             print(f"step={step}, validation_accuracy={acc}")
@@ -371,7 +374,8 @@ def train_fwd_implicit(
 
     num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
     final_accuracy = (num_correct / len(xs_test)).item()
-    record_dict('test', dict(accuracy=final_accuracy))
+    if use_simmanager:
+        record_dict('test', dict(accuracy=final_accuracy))
     if use_wandb:
         wandb.log(dict(test=dict(accuracy=final_accuracy)))
     print(f"test_accuracy={final_accuracy}")
@@ -456,6 +460,7 @@ if __name__ == '__main__':
     argparser.add_argument('--seed', type=int, default=5678)
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
+    argparser.add_argument('--simmanager', action='store_true')
     args = argparser.parse_args()
 
     from ipdb import launch_ipdb_on_exception
@@ -468,48 +473,52 @@ if __name__ == '__main__':
 
     # train_fwd_implicit(seed=args.seed, weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
     #         use_wandb=args.wandb)  # All right, let's run the code.
-    config = dict(seed=args.seed, weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity, use_wandb=args.wandb) 
+    config = dict(seed=args.seed, weight_sparsity=args.weight_sparsity,
+            disable_activity_sparsity=args.disable_activity_sparsity, use_wandb=args.wandb, use_simmanager=args.simmanager) 
 
-    ## START DIR NAMES
-    if args.location == 'mac':
-        rroot = os.path.expanduser(os.path.join('~', 'output'))
-        data_path = './data'
-    elif args.location == 'desktop':
-        rroot = os.path.join('/scratch', 'anand', 'output')
-        data_path = os.path.join(rroot, 'DATA')
-    elif args.location == 'jusuf':
-        rroot = os.path.expandvars(os.path.join('$SCRATCH', 'output'))  # JUSUF
-        data_path = os.path.expandvars(os.path.join('$PROJECT', 'DATA'))  # JUSUF
-    elif args.location == 'taurus':  # TUD cluster
-        rroot = os.path.join('/beegfs/ws/0/ansu260e-evnn-workspace', 'output')
-        data_path = os.path.join(rroot, 'DATA')
-    else:
-        raise RuntimeError(f"Unknown location: {args.location}")
-    ## END DIR NAMES
-
-    print(rroot)
-    root_dir = os.path.join(rroot, 'sparse-rtrl')
-    os.makedirs(root_dir, exist_ok=True)
-    sim_name = get_random_name()
-
-    with SimManager(sim_name, root_dir, write_protect_dirs=False, tee_stdx_to='output.log') as simman:
-        paths = simman.paths
-
-        print("Results will be stored in ", paths.results_path)
-        os.makedirs(os.path.join(paths.results_path, 'models'), exist_ok=True)
-
-        with open(os.path.join(paths.data_path, 'config.yaml'), 'w') as f:
-            yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
-
-        zarr_datastore = ZarrDataStore(os.path.join(paths.results_path, 'data.mdb'))
-        recorder = Recorder(zarr_datastore)
-
+    if not args.simmanager:
         train_fwd_implicit(**config)  # All right, let's run the code.
+    else:
+        ## START DIR NAMES
+        if args.location == 'mac':
+            rroot = os.path.expanduser(os.path.join('~', 'output'))
+            data_path = './data'
+        elif args.location == 'desktop':
+            rroot = os.path.join('/scratch', 'anand', 'output')
+            data_path = os.path.join(rroot, 'DATA')
+        elif args.location == 'jusuf':
+            rroot = os.path.expandvars(os.path.join('$SCRATCH', 'output'))  # JUSUF
+            data_path = os.path.expandvars(os.path.join('$PROJECT', 'DATA'))  # JUSUF
+        elif args.location == 'taurus':  # TUD cluster
+            rroot = os.path.join('/beegfs/ws/0/ansu260e-evnn-workspace', 'output')
+            data_path = os.path.join(rroot, 'DATA')
+        else:
+            raise RuntimeError(f"Unknown location: {args.location}")
+        ## END DIR NAMES
 
-        recorder.close()
+        print(rroot)
+        root_dir = os.path.join(rroot, 'sparse-rtrl')
+        os.makedirs(root_dir, exist_ok=True)
+        sim_name = get_random_name()
 
-        # make_plots(paths.results_path, config.total_input_width)
-        print("Results stored in ", paths.results_path)
+        with SimManager(sim_name, root_dir, write_protect_dirs=False, tee_stdx_to='output.log') as simman:
+            paths = simman.paths
+
+            print("Results will be stored in ", paths.results_path)
+            os.makedirs(os.path.join(paths.results_path, 'models'), exist_ok=True)
+
+            with open(os.path.join(paths.data_path, 'config.yaml'), 'w') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+            zarr_datastore = ZarrDataStore(os.path.join(paths.results_path, 'data.mdb'))
+            recorder = Recorder(zarr_datastore)
+
+            train_fwd_implicit(**config)  # All right, let's run the code.
+
+            recorder.close()
+
+            # make_plots(paths.results_path, config.total_input_width)
+            print("Results stored in ", paths.results_path)
 
 
 
