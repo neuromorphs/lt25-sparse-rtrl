@@ -1,6 +1,6 @@
 import math
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable
 
 import equinox as eqx
 import jax
@@ -98,6 +98,7 @@ class EGRUCell(Module):
     hidden_size: int = static_field()
     alpha: float = 0.001
     output_jac: bool = static_field()
+    output_fn: Callable = static_field()
 
     def __init__(
             self,
@@ -105,6 +106,7 @@ class EGRUCell(Module):
             hidden_size: int,
             *,
             key: Optional["jax.random.PRNGKey"],
+            activity_sparse=True,
             weight_sparsity=0.,
             output_jac=False,
             **kwargs
@@ -139,6 +141,11 @@ class EGRUCell(Module):
         self.hidden_size = hidden_size
         self.output_jac = output_jac
 
+        if activity_sparse:
+            self.output_fn = event_fn
+        else:
+            self.output_fn = lambda x: jnp.ones_like(x)
+
     def __call__(
             self, input: Array, state: Tuple[Array, Array, Array], *, key: Optional["jax.random.PRNGKey"] = None
     ):
@@ -172,7 +179,7 @@ class EGRUCell(Module):
             new_i = jnp.concatenate([new_iu, new_ir, new_ic], -1)
             new_c = (1 - new_u) * c_reset + new_u * new_z
 
-            new_o = event_fn(new_c - thr)
+            new_o = self.output_fn(new_c - thr)
             new_h = new_o * new_c
             # new_h = new_o
 

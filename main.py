@@ -183,12 +183,16 @@ def train_fwd_implicit(
         hidden_size=16,
         seed=5678,
         weight_sparsity=0.,
+        disable_activity_sparsity=False,
         # cell_type=CellType.EqxGRU,
         cell_type=CellType.EGRU,
+        use_wandb=False
 ):
-    wandb.init(project="sparse-rtrl", entity="anands", 
-               config=dict(seq_len=seq_len, batch_size=batch_size, learning_rate=learning_rate, steps=steps,
-                        hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity))
+    if use_wandb:
+        wandb.init(project="sparse-rtrl", entity="anands", 
+                config=dict(seq_len=seq_len, batch_size=batch_size, learning_rate=learning_rate, steps=steps,
+                            hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity,
+                            disable_activity_sparsity=disable_activity_sparsity, cell_type=cell_type.value))
 
     data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
 
@@ -203,7 +207,8 @@ def train_fwd_implicit(
     if cell_type in [CellType.EqxGRU]:
         model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
     else:
-        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key, weight_sparsity=weight_sparsity)
+        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key,
+                weight_sparsity=weight_sparsity, activity_sparse=(not disable_activity_sparsity))
 
     full_model = model
 
@@ -318,8 +323,9 @@ def train_fwd_implicit(
         loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state)
         # print(outs)
         loss = loss.item()
-        wandb.log(dict(train=dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
-                                  mean_state_sparsity=jnp.mean(sparsity[0]), mean_M_sparsity=jnp.mean(sparsity[1]))))
+        if use_wandb:
+            wandb.log(dict(train=dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
+                                    mean_state_sparsity=jnp.mean(sparsity[0]), mean_M_sparsity=jnp.mean(sparsity[1]))))
         if step % 10 == 0:
             print(f"step={step}, loss={loss}")
         if step % 100 == 0:
@@ -327,7 +333,8 @@ def train_fwd_implicit(
 
             num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
             acc = (num_correct / len(xs_val)).item()
-            wandb.log(dict(validation=dict(step=step, accuracy=acc)))
+            if use_wandb:
+                wandb.log(dict(validation=dict(step=step, accuracy=acc)))
             print(f"step={step}, validation_accuracy={acc}")
             if acc > 0.99:
                 break
@@ -336,7 +343,8 @@ def train_fwd_implicit(
 
     num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
     final_accuracy = (num_correct / len(xs_test)).item()
-    wandb.log(dict(test=dict(accuracy=final_accuracy)))
+    if use_wandb:
+        wandb.log(dict(test=dict(accuracy=final_accuracy)))
     print(f"test_accuracy={final_accuracy}")
 
 
@@ -415,6 +423,8 @@ def main(
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser()
     argparser.add_argument('--weight-sparsity', type=float, default=0.0)
+    argparser.add_argument('--disable-activity-sparsity', action='store_true')
+    argparser.add_argument('--wandb', action='store_true')
     args = argparser.parse_args()
 
     from ipdb import launch_ipdb_on_exception
@@ -425,4 +435,5 @@ if __name__ == '__main__':
     #     # train()  # All right, let's run the code.
     #     train_fwd_implicit()  # All right, let's run the code.
 
-    train_fwd_implicit(weight_sparsity=args.weight_sparsity)  # All right, let's run the code.
+    train_fwd_implicit(weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
+            use_wandb=args.wandb)  # All right, let's run the code.
