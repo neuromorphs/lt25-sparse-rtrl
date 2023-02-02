@@ -1,0 +1,6 @@
+*
+!/.gitignore
+!/requirements.txt
+!/bin
+!/bin/*.py
+*.bak.py

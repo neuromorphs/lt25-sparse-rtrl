@@ -116,13 +116,21 @@ class EGRUCell(Module):
         ihkey, hhkey, bkey, thkey = jrandom.split(key, 4)
         lim = math.sqrt(1 / hidden_size)
 
-        self.weight_ih = jrandom.uniform(
-            ihkey, (3 * hidden_size, input_size), minval=-lim, maxval=lim
+        xavier_uniform_initializer = jax.nn.initializers.glorot_normal()
+
+        # self.weight_ih = jrandom.uniform(
+        #     ihkey, (3 * hidden_size, input_size), minval=-lim, maxval=lim
+        # )
+        self.weight_ih = xavier_uniform_initializer(
+            ihkey, (3 * hidden_size, input_size), jnp.float32
         )
 
         hhwkey, hhmkey = jrandom.split(hhkey, 2)
-        self.weight_hh = jrandom.uniform(
-            hhwkey, (3 * hidden_size, hidden_size), minval=-lim, maxval=lim
+        # self.weight_hh = jrandom.uniform(
+        #     hhwkey, (3 * hidden_size, hidden_size), minval=-lim, maxval=lim
+        # )
+        self.weight_hh = xavier_uniform_initializer(
+            hhwkey, (3 * hidden_size, hidden_size), jnp.float32
         )
         s = weight_sparsity
         self.mask_hh = jrandom.choice(
@@ -135,7 +143,7 @@ class EGRUCell(Module):
 
         self.threshold = jrandom.normal(
             thkey, (hidden_size,)
-        )
+        ) - 1.
 
         self.input_size = input_size
         self.hidden_size = hidden_size

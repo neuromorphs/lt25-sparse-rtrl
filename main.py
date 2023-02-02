@@ -1,7 +1,12 @@
+import os
+from datetime import datetime
+import random
 import pickle
 from functools import partial
 import argparse
 
+import numpy as np
+import yaml
 import equinox as eqx
 import jax
 import jax.lax as lax
@@ -13,8 +18,21 @@ import ipdb
 
 import wandb
 
+from simmanager import SimManager
+from simrecorder import Recorder, ZarrDataStore
+
 from data import get_data, dataloader
 from models import EqxRNN, RNN, CellType
+
+def record_dict(prefix, d):
+    for k, v in d.items():
+        recorder.record('{}/{}'.format(prefix, k), np.array(v))
+
+def get_random_name(prefix='baseline'):
+    datetime_suffix = datetime.now().strftime("D%d-%m-%Y-T%H-%M-%S")
+    randnum = str(random.randint(1e3, 1e5))
+    sim_name = f"{prefix}-{randnum}-{datetime_suffix}"
+    return sim_name
 
 @eqx.filter_jit
 def loss_fn(y, pred_y):
@@ -188,6 +206,7 @@ def train_fwd_implicit(
         cell_type=CellType.EGRU,
         use_wandb=False
 ):
+    print(f"Seed: {seed}")
     if use_wandb:
         wandb.init(project="sparse-rtrl", entity="anands", 
                 config=dict(seq_len=seq_len, batch_size=batch_size, learning_rate=learning_rate, steps=steps,
@@ -264,8 +283,8 @@ def train_fwd_implicit(
         # jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
         # jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
-        time_state_sparsity = jnp.mean(outs[0] == 0., axis=1)
-        time_J_sparsity = jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.), axis=1)
+        time_state_sparsity = jnp.mean(outs[0] == 0., axis=2)
+        time_J_sparsity = jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.), axis=(2, 3, 4))
 
         if cell_type in [CellType.EqxGRU]:
             final_state = outs[:, -1]
@@ -324,9 +343,12 @@ def train_fwd_implicit(
         loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state)
         # print(outs)
         loss = loss.item()
+        data = dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
+                                    mean_state_sparsity=jnp.mean(sparsity[0]), mean_M_sparsity=jnp.mean(sparsity[1]))
+        record_dict('train', data)
         if use_wandb:
-            wandb.log(dict(train=dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
-                                    mean_state_sparsity=jnp.mean(sparsity[0]), mean_M_sparsity=jnp.mean(sparsity[1]))))
+            wandb.log(dict(train=data))
+
         if step % 10 == 0:
             print(f"step={step}, loss={loss}")
         if step % 100 == 0:
@@ -335,16 +357,18 @@ def train_fwd_implicit(
             num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
             acc = (num_correct / len(xs_val)).item()
             validation_accs.append(acc)
+            record_dict('validation', dict(step=step, accuracy=acc))
             if use_wandb:
                 wandb.log(dict(validation=dict(step=step, accuracy=acc)))
             print(f"step={step}, validation_accuracy={acc}")
-            # if jnp.mean(jnp.array(validation_accs[-3:])) > 0.999:
-            #     break
+            if jnp.mean(jnp.array(validation_accs[-3:])) > 0.999:
+                print("=================== Reached required accuracy")
 
     pred_ys, outs = jax.vmap(full_model)(xs_test)
 
     num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
     final_accuracy = (num_correct / len(xs_test)).item()
+    record_dict('test', dict(accuracy=final_accuracy))
     if use_wandb:
         wandb.log(dict(test=dict(accuracy=final_accuracy)))
     print(f"test_accuracy={final_accuracy}")
@@ -424,7 +448,9 @@ def main(
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser()
+    argparser.add_argument('--location', type=str, choices=['mac', 'desktop', 'jusuf', 'taurus'], default='desktop')
     argparser.add_argument('--weight-sparsity', type=float, default=0.0)
+    argparser.add_argument('--seed', type=int, default=5678)
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
     args = argparser.parse_args()
@@ -437,5 +463,50 @@ if __name__ == '__main__':
     #     # train()  # All right, let's run the code.
     #     train_fwd_implicit()  # All right, let's run the code.
 
-    train_fwd_implicit(weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
-            use_wandb=args.wandb)  # All right, let's run the code.
+    # train_fwd_implicit(seed=args.seed, weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
+    #         use_wandb=args.wandb)  # All right, let's run the code.
+    config = dict(seed=args.seed, weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity, use_wandb=args.wandb) 
+
+    ## START DIR NAMES
+    if args.location == 'mac':
+        rroot = os.path.expanduser(os.path.join('~', 'output'))
+        data_path = './data'
+    elif args.location == 'desktop':
+        rroot = os.path.join('/scratch', 'anand', 'output')
+        data_path = os.path.join(rroot, 'DATA')
+    elif args.location == 'jusuf':
+        rroot = os.path.expandvars(os.path.join('$SCRATCH', 'output'))  # JUSUF
+        data_path = os.path.expandvars(os.path.join('$PROJECT', 'DATA'))  # JUSUF
+    elif args.location == 'taurus':  # TUD cluster
+        rroot = os.path.join('/beegfs/ws/0/ansu260e-evnn-workspace', 'output')
+        data_path = os.path.join(rroot, 'DATA')
+    else:
+        raise RuntimeError(f"Unknown location: {args.location}")
+    ## END DIR NAMES
+
+    print(rroot)
+    root_dir = os.path.join(rroot, 'sparse-rtrl')
+    os.makedirs(root_dir, exist_ok=True)
+    sim_name = get_random_name()
+
+    with SimManager(sim_name, root_dir, write_protect_dirs=False, tee_stdx_to='output.log') as simman:
+        paths = simman.paths
+
+        print("Results will be stored in ", paths.results_path)
+        os.makedirs(os.path.join(paths.results_path, 'models'), exist_ok=True)
+
+        with open(os.path.join(paths.data_path, 'config.yaml'), 'w') as f:
+            yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+        zarr_datastore = ZarrDataStore(os.path.join(paths.results_path, 'data.mdb'))
+        recorder = Recorder(zarr_datastore)
+
+        train_fwd_implicit(**config)  # All right, let's run the code.
+
+        recorder.close()
+
+        # make_plots(paths.results_path, config.total_input_width)
+        print("Results stored in ", paths.results_path)
+
+
+
