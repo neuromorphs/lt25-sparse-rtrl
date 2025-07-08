@@ -96,7 +96,7 @@ class EGRUCell(Module):
     bias: Optional[Array]
     input_size: int = static_field()
     hidden_size: int = static_field()
-    alpha: float = 0.001
+    alpha: float = static_field()
     output_jac: bool = static_field()
     output_fn: Callable = static_field()
 
@@ -112,6 +112,7 @@ class EGRUCell(Module):
             **kwargs
     ):
         super().__init__(**kwargs)
+        self.alpha = 0.001
 
         ihkey, hhkey, bkey, thkey = jrandom.split(key, 4)
         lim = math.sqrt(1 / hidden_size)
