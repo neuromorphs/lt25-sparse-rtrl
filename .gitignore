@@ -6,3 +6,5 @@
 *.bak.py
 !/ipynbs
 !/ipynbs/*.ipynb
+!pyproject.toml
+!uv.lock

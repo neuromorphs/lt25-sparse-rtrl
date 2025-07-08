@@ -1,0 +1,40 @@
+[project]
+name = "sparse-rtrl"
+version = "0.1.0"
+description = ""
+authors = [{ name = "Anand", email = "anandtrex@users.noreply.github.com" }]
+requires-python = ">3.10, <4.0"
+readme = "README.md"
+dependencies = [
+    "sdict",
+    "simmanager",
+    "equinox",
+    "optax",
+    "pyyaml",
+    "jax[cpu]>=0.6.2",
+    "ipdb>=0.13.13",
+    "simrecorder",
+    "wandb>=0.21.0",
+    "ml-collections>=1.1.0",
+    "jaxpruner",
+    "haliax",
+]
+
+[tool.uv]
+
+[tool.uv.sources]
+sdict = { url = "https://github.com/IGITUGraz/sdict/archive/master.zip" }
+simmanager = { url = "https://github.com/IGITUGraz/SimManager/archive/refs/tags/v0.8.4.zip" }
+simrecorder = { url = "https://github.com/IGITUGraz/SimRecorder/archive/master.zip" }
+jaxpruner = { path = "../jaxpruner", editable = true }
+haliax = { git = "https://github.com/stanford-crfm/haliax.git" }
+
+[tool.hatch.build.targets.sdist]
+include = ["sparse_rtrl"]
+
+[tool.hatch.build.targets.wheel]
+include = ["sparse_rtrl"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
