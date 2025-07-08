@@ -6,6 +6,7 @@ from functools import partial
 import argparse
 
 import ipdb
+from ipdb import launch_ipdb_on_exception
 import numpy as np
 import yaml
 import equinox as eqx
@@ -21,23 +22,10 @@ import ml_collections
 
 import wandb
 
-from simmanager import SimManager
-from simrecorder import Recorder, ZarrDataStore
-
 from data import get_data, dataloader
 from models import EqxRNN, RNN, CellType
 
 
-def record_dict(prefix, d):
-    for k, v in d.items():
-        recorder.record('{}/{}'.format(prefix, k), np.array(v))
-
-
-def get_random_name(prefix='baseline'):
-    datetime_suffix = datetime.now().strftime("D%d-%m-%Y-T%H-%M-%S")
-    randnum = str(random.randint(1e3, 1e5))
-    sim_name = f"{prefix}-{randnum}-{datetime_suffix}"
-    return sim_name
 
 
 @eqx.filter_jit
@@ -78,9 +66,12 @@ def train(
         steps=600,
         hidden_size=16,
         seed=5678,
-        # cell_type=CellType.EqxGRU,
+        weight_sparsity=0.,
+        disable_activity_sparsity=False,
         cell_type=CellType.EGRU,
         prune=False,
+        pruner=None,
+        use_wandb=False,
 ):
     """
     Trains with BPTT
@@ -92,9 +83,11 @@ def train(
 
     if cell_type in [CellType.EqxGRU]:
         model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+    elif cell_type in [CellType.RNN]:
+        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
     else:
         model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key,
-                    output_jac=False)
+                    weight_sparsity=weight_sparsity, activity_sparse=(not disable_activity_sparsity))
 
     full_model = model
 
@@ -102,15 +95,29 @@ def train(
     # region.
     @eqx.filter_jit
     def make_step(full_model, x, y, opt_state):
+        params, static = eqx.partition(full_model, eqx.is_inexact_array)
+        trainable_params = haliax.state_dict.to_state_dict(params)
+
         (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
         # updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_array))
-        updates, opt_state = optim.update(grads, opt_state)
-        full_model = eqx.apply_updates(full_model, updates)
+        grads = haliax.state_dict.to_state_dict(eqx.filter(grads, eqx.is_inexact_array))
+        updates, opt_state = optim.update(grads, opt_state, trainable_params)
+        trainable_params = eqx.apply_updates(trainable_params, updates)
+        # For jax pruner
+        if prune:
+            trainable_params = pruner.post_gradient_update(trainable_params, opt_state)
+        ## jax pruner
+        params = haliax.state_dict.from_state_dict(params, trainable_params)
+        full_model = eqx.combine(params, static)
         return loss, full_model, opt_state, outs
 
     optim = optax.adam(learning_rate)
+    if prune:
+        optim = pruner.wrap_optax(optim)
 
-    opt_state = optim.init(full_model)
+    params = eqx.filter(full_model, eqx.is_inexact_array)
+    trainable_params = haliax.state_dict.to_state_dict(params)
+    opt_state = optim.init(trainable_params)
 
     for step, (x, y) in zip(range(steps), iter_data):
         loss, full_model, opt_state, outs = make_step(full_model, x, y, opt_state)
@@ -137,11 +144,10 @@ def train_fwd_implicit(
         seed=5678,
         weight_sparsity=0.,
         disable_activity_sparsity=False,
-        # cell_type=CellType.EqxGRU,
         cell_type=CellType.EGRU,
         prune=False,
+        pruner=None,
         use_wandb=False,
-        use_simmanager=False
 ):
     """
     Trains with RTRL
@@ -298,9 +304,6 @@ def train_fwd_implicit(
     optim = optax.adam(learning_rate)
     # For Jax pruner
     if prune:
-        sparsity_distribution = partial( jaxpruner.sparsity_distributions.uniform, sparsity=0.8 )
-        pruner = jaxpruner.MagnitudePruning( sparsity_distribution_fn=sparsity_distribution )
-        # sparsity_updater = jaxpruner.create_updater_from_config(config.sparsity_config)
         optim = pruner.wrap_optax(optim)
     ## End Jax pruner
     # ipdb.set_trace()
@@ -326,8 +329,6 @@ def train_fwd_implicit(
                     cum_mean_state_density=cum_mean_state_density,
                     cum_mean_M_density=cum_mean_M_density,
                     mean_sq_M_sparsity=jnp.mean(sparsity[1] ** 2))
-        if use_simmanager:
-            record_dict('train', data)
         if use_wandb:
             wandb.log(dict(train=data))
 
@@ -341,8 +342,6 @@ def train_fwd_implicit(
             num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
             acc = (num_correct / len(xs_val)).item()
             validation_accs.append(acc)
-            if use_simmanager:
-                record_dict('validation', dict(step=step, accuracy=acc))
             if use_wandb:
                 wandb.log(dict(validation=dict(step=step, accuracy=acc)))
             print(f"step={step}, validation_accuracy={acc}")
@@ -354,84 +353,10 @@ def train_fwd_implicit(
 
     num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
     final_accuracy = (num_correct / len(xs_test)).item()
-    if use_simmanager:
-        record_dict('test', dict(accuracy=final_accuracy))
     if use_wandb:
         wandb.log(dict(test=dict(accuracy=final_accuracy)))
     print(f"test_accuracy={final_accuracy}")
 
-
-def main(
-        dataset_size=10000,
-        seq_len=100,
-        batch_size=32,
-        hidden_size=16,
-        seed=5678,
-        # cell_type=CellType.EqxGRU,
-        cell_type=CellType.EGRU,
-):
-    # raise RuntimeError("Doesn't work with internal linear layer yet")
-    data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
-    xs, ys = get_data(dataset_size, seq_len=seq_len, key=data_key_train)
-    xs_val, ys_val = get_data(2500, seq_len=seq_len, key=data_key_val)
-    xs_test, ys_test = get_data(2500, seq_len=seq_len, key=data_key_test)
-    iter_data = dataloader((xs, ys), batch_size, key=loader_key)
-
-    if cell_type in [CellType.EqxGRU]:
-        model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
-    else:
-        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
-
-    # linear = eqx.nn.Linear(out_features=1, in_features=hidden_size, key=model_key)
-
-    full_model = model
-
-    x, y = next(iter_data)
-    if cell_type in [CellType.EGRU]:
-        loss, (new_h, new_c, new_o, new_i, (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi)) = \
-            compute_loss_and_outputs(full_model, x, y)
-        states, Js, bar_Ms = new_c * new_o, Jc, bar_Mc
-        print("EGRU")
-    elif cell_type in [CellType.RNN]:
-        loss, (states, bar_Ms, Js) = compute_loss_and_outputs(full_model, x, y)
-
-    print("Shape bar_Ms & Js: ", jax.tree_util.tree_map(lambda bar_ms: bar_ms.shape, bar_Ms), Js.shape)
-
-    # print(Js[:, 0])
-    loss = loss.item()
-    print(f"loss={loss}")
-
-    Js_tr = jnp.transpose(Js, (1, 0, 2, 3))
-    bar_Ms_tr = jax.tree_util.tree_map(lambda bar_ms: jnp.swapaxes(bar_ms, 0, 1), bar_Ms)
-
-    print("Transpose shape bar_Ms & Js: ", jax.tree_util.tree_map(lambda bar_ms_tr: bar_ms_tr.shape, bar_Ms_tr),
-          Js_tr.shape)
-
-    bar_Ms_tr_w = bar_Ms_tr.weight_hh
-
-    _, Ms_tr = lax.scan(compute_influence_matrix, jnp.zeros_like(bar_Ms_tr_w[0, :]), (Js_tr, bar_Ms_tr_w))
-
-    Ms = jnp.transpose(Ms_tr, (1, 0, 2, 3, 4))
-
-    print("Ms.shape: ", Ms.shape)
-
-    print("Mean value of states: ", jnp.mean(states))
-    print("Percent zeros in states: ", jnp.mean(states == 0.))
-
-    print("Percent zeros in Js: ", jnp.mean(jnp.isclose(Js, 0.)))
-    print("Percent zeros in bar_Ms: ", jnp.mean(jnp.isclose(bar_Ms.weight_hh, 0.)))
-
-    print("Percent zeros in Ms: ", jnp.mean(jnp.isclose(Ms, 0.)))
-
-    # pred_ys, _ = jax.vmap(model)(xs)
-    # num_correct = jnp.sum((pred_ys > 0.5) == ys)
-    # final_accuracy = (num_correct / dataset_size).item()
-    # print(f"final_accuracy={final_accuracy}")
-
-    fname = f'sparse-data-{cell_type.value}-{seq_len}.p'
-    with open(fname, 'wb') as f:
-        pickle.dump(dict(Ms=Ms, bar_Ms=bar_Ms, Js=Js, states=states), f)
-    print(f"Saved in {fname}")
 
 
 if __name__ == '__main__':
@@ -441,78 +366,32 @@ if __name__ == '__main__':
     argparser.add_argument('--seed', type=int, default=5678)
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
-    argparser.add_argument('--simmanager', action='store_true')
     argparser.add_argument('--prune', action='store_true')
+    argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='rtrl')
     args = argparser.parse_args()
 
-    from ipdb import launch_ipdb_on_exception
-
-    # with launch_ipdb_on_exception():
-    #     # train_fwd()
-    #     # main()  # All right, let's run the code.
-    #     # train()  # All right, let's run the code.
-    #     train_fwd_implicit()  # All right, let's run the code.
-
-    # train_fwd_implicit(seed=args.seed, weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
-    #         use_wandb=args.wandb)  # All right, let's run the code.
     config_dict = dict(seed=args.seed, weight_sparsity=args.weight_sparsity,
                        disable_activity_sparsity=args.disable_activity_sparsity, use_wandb=args.wandb,
-                       use_simmanager=args.simmanager, prune=args.prune, cell_type=CellType.EGRU)
-    config = ml_collections.ConfigDict(config_dict)
+                       prune=args.prune, cell_type=CellType.EGRU)
+    # config = ml_collections.ConfigDict(config_dict)
 
-    sparsity_config_dict = dict(
-        algorithm='magnitude',
-        update_freq=10,
-        update_end_step=1000,
-        update_start_step=200,
-        sparsity=0.95,
-        dist_type='erk',
-    )
-    config.sparsity_config = ml_collections.ConfigDict(sparsity_config_dict)
+    # sparsity_config_dict = dict(
+    #     algorithm='magnitude',
+    #     update_freq=10,
+    #     update_end_step=1000,
+    #     update_start_step=200,
+    #     sparsity=0.95,
+    #     dist_type='erk',
+    # )
+    # config.sparsity_config = ml_collections.ConfigDict(sparsity_config_dict)
+    if args.prune:
+        sparsity_distribution = partial(jaxpruner.sparsity_distributions.uniform, sparsity=0.8)
+        pruner = jaxpruner.MagnitudePruning(sparsity_distribution_fn=sparsity_distribution)
+        # sparsity_updater = jaxpruner.create_updater_from_config(config.sparsity_config)
 
-    if not args.simmanager:
-        with launch_ipdb_on_exception():
-            train_fwd_implicit(**config_dict)  # All right, let's run the code.
+    if args.method == 'rtrl':
+        train_fwd_implicit(pruner=pruner, **config_dict)  # All right, let's run the code.
+    elif args.method == 'bptt':
+        train(pruner=pruner, **config_dict)
     else:
-        ## START DIR NAMES
-        if args.location == 'mac':
-            rroot = os.path.expanduser(os.path.join('~', 'output'))
-            data_path = './data'
-        elif args.location == 'desktop':
-            rroot = os.path.join('/scratch', 'anand', 'output')
-            data_path = os.path.join(rroot, 'DATA')
-        elif args.location == 'jusuf':
-            rroot = os.path.expandvars(os.path.join('$SCRATCH', 'output'))  # JUSUF
-            data_path = os.path.expandvars(os.path.join('$PROJECT', 'DATA'))  # JUSUF
-        elif args.location == 'taurus':  # TUD cluster
-            rroot = os.path.join('/beegfs/ws/0/ansu260e-evnn-workspace', 'output')
-            data_path = os.path.join(rroot, 'DATA')
-        else:
-            raise RuntimeError(f"Unknown location: {args.location}")
-        ## END DIR NAMES
-
-        print(rroot)
-        root_dir = os.path.join(rroot, 'sparse-rtrl')
-        os.makedirs(root_dir, exist_ok=True)
-        sim_name = get_random_name()
-
-        with SimManager(sim_name, root_dir, write_protect_dirs=False, tee_stdx_to='output.log') as simman:
-            paths = simman.paths
-
-            print("Results will be stored in ", paths.results_path)
-            os.makedirs(os.path.join(paths.results_path, 'models'), exist_ok=True)
-
-            with open(os.path.join(paths.data_path, 'config.yaml'), 'w') as f:
-                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
-
-            zarr_datastore = ZarrDataStore(os.path.join(paths.results_path, 'data.mdb'))
-            recorder = Recorder(zarr_datastore)
-
-            train_fwd_implicit(**config_dict)  # All right, let's run the code.
-
-            recorder.close()
-
-            # make_plots(paths.results_path, config.total_input_width)
-            print("Results stored in ", paths.results_path)
-
-# FIXME: Storate simmanager paths in wandb
+        raise RuntimeError(f"Unknown method {args.method}")
