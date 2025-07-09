@@ -329,6 +329,7 @@ def train(
 
         if step % 10 == 0:
             print(f"step={step}, loss={loss}")
+        va = []
         if step % 100 == 0:
             for batch_val in val_loader:
                 xs_val, ys_val, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
@@ -336,25 +337,30 @@ def train(
 
                 num_correct = jnp.sum(pred_ys.argmax() == ys_val)
                 acc = (num_correct / len(xs_val)).item()
-                validation_accs.append(acc)
-                if use_wandb:
-                    wandb.log(dict(validation=dict(step=step, accuracy=acc)))
-            print(f"step={step}, validation_accuracy={acc}")
-            if prune:
-                print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
-            if jnp.mean(jnp.array(validation_accs[-3:])) > 0.99:
-                print("=================== Reached required accuracy")
-                break
+                va.append(acc)
+            acc = np.mean(va)
+            validation_accs.append(acc)
+            if use_wandb:
+                wandb.log(dict(validation=dict(step=step, accuracy=acc)))
+        print(f"step={step}, validation_accuracy={acc}")
+        if prune:
+            print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
+        if jnp.mean(jnp.array(validation_accs[-3:])) > 0.99:
+            print("=================== Reached required accuracy")
 
+    ta = []
     for batch_tst in tst_loader:
         xs_test, ys_test, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
         pred_ys, outs = jax.vmap(full_model)(xs_test)
 
         num_correct = jnp.sum(pred_ys.argmax() == ys_val)
         final_accuracy = (num_correct / len(xs_test)).item()
-        if use_wandb:
-            wandb.log(dict(test=dict(accuracy=final_accuracy)))
-        print(f"test_accuracy={final_accuracy}")
+        ta.append(final_accuracy)
+
+    final_accuracy = np.mean(ta)
+    if use_wandb:
+        wandb.log(dict(test=dict(accuracy=final_accuracy)))
+    print(f"test_accuracy={final_accuracy}")
 
 
 if __name__ == '__main__':
@@ -368,9 +374,12 @@ if __name__ == '__main__':
     argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='rtrl')
     args = argparser.parse_args()
 
-    config_dict = dict(seed=args.seed, weight_sparsity=args.weight_sparsity,
-                       disable_activity_sparsity=args.disable_activity_sparsity, use_wandb=args.wandb,
-                       prune=args.prune, cell_type=CellType.EGRU)
+    config_dict = dict(seed=args.seed,
+                       cell_type=CellType.EGRU, hidden_size=128,
+                       weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
+                       prune=args.prune,
+                       use_wandb=args.wandb,
+                       )
     # config = ml_collections.ConfigDict(config_dict)
 
     pruner = None
@@ -388,10 +397,10 @@ if __name__ == '__main__':
         # pruner = jaxpruner.MagnitudePruning(sparsity_distribution_fn=sparsity_distribution)
         pruner = jaxpruner.create_updater_from_config(sparsity_config)
 
-    with launch_ipdb_on_exception():
-        if args.method == 'rtrl':
-            train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
-        elif args.method == 'bptt':
-            train(make_step=make_step_bptt, pruner=pruner, **config_dict)
-        else:
-            raise RuntimeError(f"Unknown method {args.method}")
+    # with launch_ipdb_on_exception():
+    if args.method == 'rtrl':
+        train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
+    elif args.method == 'bptt':
+        train(make_step=make_step_bptt, pruner=pruner, **config_dict)
+    else:
+        raise RuntimeError(f"Unknown method {args.method}")
