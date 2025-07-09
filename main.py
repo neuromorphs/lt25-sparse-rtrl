@@ -335,25 +335,26 @@ def train(
                 xs_val, ys_val, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
                 pred_ys, outs = jax.vmap(full_model)(xs_val)
 
-                num_correct = jnp.sum(pred_ys.argmax() == ys_val)
+                num_correct = jnp.sum(pred_ys.argmax(axis=1) == ys_val)
+                # ipdb.set_trace()
                 acc = (num_correct / len(xs_val)).item()
                 va.append(acc)
             acc = np.mean(va)
             validation_accs.append(acc)
             if use_wandb:
                 wandb.log(dict(validation=dict(step=step, accuracy=acc)))
-        print(f"step={step}, validation_accuracy={acc}")
-        if prune:
-            print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
-        if jnp.mean(jnp.array(validation_accs[-3:])) > 0.99:
-            print("=================== Reached required accuracy")
+            print(f"step={step}, validation_accuracy={acc}")
+            if prune:
+                print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
+            if jnp.mean(jnp.array(validation_accs[-3:])) > 0.99:
+                print("=================== Reached required accuracy")
 
     ta = []
     for batch_tst in tst_loader:
         xs_test, ys_test, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
         pred_ys, outs = jax.vmap(full_model)(xs_test)
 
-        num_correct = jnp.sum(pred_ys.argmax() == ys_val)
+        num_correct = jnp.sum(pred_ys.argmax(axis=1) == ys_val)
         final_accuracy = (num_correct / len(xs_test)).item()
         ta.append(final_accuracy)
 
