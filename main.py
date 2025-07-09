@@ -5,6 +5,7 @@ import pickle
 from functools import partial
 import argparse
 
+from tqdm import tqdm
 import ipdb
 from ipdb import launch_ipdb_on_exception
 import numpy as np
@@ -26,10 +27,68 @@ from dataloaders.dataloading import create_speechcommands35_classification_datas
 # from data import get_data, dataloader
 from models import EqxRNN, RNN, CellType
 
+from typing import Any, Tuple
+
+def prep_batch(batch: tuple,
+               seq_len: int,
+               in_dim: int) -> Tuple[np.ndarray, np.ndarray, np.array]:
+    """
+    Take a batch and convert it to a standard x/y format.
+    :param batch:       (x, y, aux_data) as returned from dataloader.
+    :param seq_len:     (int) length of sequence.
+    :param in_dim:      (int) dimension of input.
+    :return:
+    """
+    if len(batch) == 2:
+        inputs, targets = batch
+        aux_data = {}
+    elif len(batch) == 3:
+        inputs, targets, aux_data = batch
+    else:
+        raise RuntimeError("Err... not sure what I should do... Unhandled data type. ")
+
+    # Convert to JAX.
+    inputs = np.asarray(inputs.numpy())
+
+    # Grab lengths from aux if it is there.
+    lengths = aux_data.get('lengths', None)
+
+    # Make all batches have same sequence length
+    num_pad = seq_len - inputs.shape[1]
+    if num_pad > 0:
+        # Assuming vocab padding value is zero
+        inputs = np.pad(inputs, ((0, 0), (0, num_pad)), 'constant', constant_values=(0,))
+
+    # Inputs is either [n_batch, seq_len] or [n_batch, seq_len, in_dim].
+    # If there are not three dimensions and trailing dimension is not equal to in_dim then
+    # transform into one-hot.  This should be a fairly reliable fix.
+    if (inputs.ndim < 3) and (inputs.shape[-1] != in_dim):
+        inputs = one_hot(np.asarray(inputs), in_dim)
+
+    # If there are lengths, bundle them up.
+    if lengths is not None:
+        lengths = np.asarray(lengths.numpy())
+        full_inputs = (inputs.astype(float), lengths.astype(float))
+    else:
+        full_inputs = inputs.astype(float)
+
+    # Convert and apply.
+    targets = np.array(targets.numpy())
+
+    # If there is an aux channel containing the integration times, then add that.
+    if 'timesteps' in aux_data.keys():
+        integration_timesteps = np.diff(np.asarray(aux_data['timesteps'].numpy()))
+    else:
+        integration_timesteps = np.ones((len(inputs), seq_len))
+
+    return full_inputs, targets.astype(float), integration_timesteps
+
 @eqx.filter_jit
 def loss_fn(y, pred_y):
-    # Trains with respect to binary cross-entropy
-    l = -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y))
+    one_hot_label = jax.nn.one_hot(y, num_classes=pred_y.shape[1])
+    l =  -np.sum(one_hot_label * pred_y)
+    # # Trains with respect to binary cross-entropy
+    # l = -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y))
     return l, l
 
 @eqx.filter_jit
@@ -206,10 +265,11 @@ def train(
                                hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity,
                                disable_activity_sparsity=disable_activity_sparsity, cell_type=cell_type.value))
 
+    cache_dir = './raw_datasets/speech_commands/0.0.2/SpeechCommands/processed_data'
     trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE = \
 	        create_speechcommands35_classification_dataset(cache_dir, bsz = batch_size, seed = seed)
 
-    # data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
+    _, model_key = jrandom.split(jrandom.PRNGKey(seed), 2)
     #
     # xs, ys = get_data(dataset_size, seq_len, key=data_key_train)
     # idx = jax.random.randint(data_key_val, (dataset_size,), 0, dataset_size)
@@ -246,7 +306,10 @@ def train(
 
     validation_accs = []
     cum_mean_state_density, cum_mean_M_density = 0., 0.
-    for step, (x, y) in zip(range(steps), trn_loader):
+    # for step, (x, y) in zip(range(steps), trn_loader):
+    for step, batch in enumerate(tqdm(trn_loader)):
+        x, y, integration_times = prep_batch(batch, SEQ_LENGTH, IN_DIM)
+
         loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, optim, cell_type, prune)
 
         # print(outs)
@@ -267,10 +330,11 @@ def train(
         if step % 10 == 0:
             print(f"step={step}, loss={loss}")
         if step % 100 == 0:
-            for xs_val, ys_val in val_loader:
+            for batch_val in val_loader:
+                xs_val, ys_val, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
                 pred_ys, outs = jax.vmap(full_model)(xs_val)
 
-                num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
+                num_correct = jnp.sum(pred_ys.argmax() == ys_val)
                 acc = (num_correct / len(xs_val)).item()
                 validation_accs.append(acc)
                 if use_wandb:
@@ -282,10 +346,11 @@ def train(
                 print("=================== Reached required accuracy")
                 break
 
-    for xs_test, ys_test in tst_loader:
+    for batch_tst in tst_loader:
+        xs_test, ys_test, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
         pred_ys, outs = jax.vmap(full_model)(xs_test)
 
-        num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
+        num_correct = jnp.sum(pred_ys.argmax() == ys_val)
         final_accuracy = (num_correct / len(xs_test)).item()
         if use_wandb:
             wandb.log(dict(test=dict(accuracy=final_accuracy)))
@@ -323,9 +388,10 @@ if __name__ == '__main__':
         # pruner = jaxpruner.MagnitudePruning(sparsity_distribution_fn=sparsity_distribution)
         pruner = jaxpruner.create_updater_from_config(sparsity_config)
 
-    if args.method == 'rtrl':
-        train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
-    elif args.method == 'bptt':
-        train(make_step=make_step_bptt, pruner=pruner, **config_dict)
-    else:
-        raise RuntimeError(f"Unknown method {args.method}")
+    with launch_ipdb_on_exception():
+        if args.method == 'rtrl':
+            train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
+        elif args.method == 'bptt':
+            train(make_step=make_step_bptt, pruner=pruner, **config_dict)
+        else:
+            raise RuntimeError(f"Unknown method {args.method}")

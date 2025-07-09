@@ -6,26 +6,32 @@ authors = [{ name = "Anand", email = "anandtrex@users.noreply.github.com" }]
 requires-python = ">3.10, <4.0"
 readme = "README.md"
 dependencies = [
-    "sdict",
-    "simmanager",
     "equinox",
     "optax",
     "pyyaml",
     "ipdb>=0.13.13",
-    "simrecorder",
     "wandb>=0.21.0",
     "ml-collections>=1.1.0",
     "haliax",
     "jaxpruner",
     "jax[cuda12]",
+    "datasets",
+    "flax",
+    "jaxlib",
+    "pydub",
+    "scikit-learn>=1.7.0",
+    "tensorflow",
+    "tensorflow-datasets",
+    "torch",
+    "torchaudio>=2.7.0",
+    "torchtext",
+    "torchvision>=0.22.0",
+    "tqdm",
 ]
 
 [tool.uv]
 
 [tool.uv.sources]
-sdict = { url = "https://github.com/IGITUGraz/sdict/archive/master.zip" }
-simmanager = { url = "https://github.com/IGITUGraz/SimManager/archive/refs/tags/v0.8.4.zip" }
-simrecorder = { url = "https://github.com/IGITUGraz/SimRecorder/archive/master.zip" }
 haliax = { git = "https://github.com/stanford-crfm/haliax.git" }
 jaxpruner = { git = "https://github.com/google-research/jaxpruner.git" }
 

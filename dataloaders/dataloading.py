@@ -253,7 +253,7 @@ def create_speechcommands35_classification_dataset(cache_dir: Union[str, Path] =
 	See abstract template.
 	"""
 	print("[*] Generating SpeechCommands35 Classification Dataset")
-	from s5.dataloaders.basic import SpeechCommands
+	from dataloaders.basic import SpeechCommands
 	name = 'sc'
 
 	dir_name = f'./raw_datasets/speech_commands/0.0.2/'
