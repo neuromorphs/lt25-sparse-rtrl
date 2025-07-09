@@ -22,7 +22,8 @@ import ml_collections
 
 import wandb
 
-from data import get_data, dataloader
+from dataloaders.dataloading import create_speechcommands35_classification_dataset
+# from data import get_data, dataloader
 from models import EqxRNN, RNN, CellType
 
 @eqx.filter_jit
@@ -57,6 +58,7 @@ def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
     trainable_params = haliax.state_dict.to_state_dict(params)
 
     (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
+
     # updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     grads = haliax.state_dict.to_state_dict(eqx.filter(grads, eqx.is_inexact_array))
     updates, opt_state = optim.update(grads, opt_state, trainable_params)
@@ -182,7 +184,7 @@ def train(
         make_step,
         dataset_size=10000,
         seq_len=17,
-        batch_size=32,
+        batch_size=50,
         learning_rate=3e-3,
         steps=10000,
         hidden_size=16,
@@ -204,39 +206,32 @@ def train(
                                hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity,
                                disable_activity_sparsity=disable_activity_sparsity, cell_type=cell_type.value))
 
-    data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
+    trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE = \
+	        create_speechcommands35_classification_dataset(cache_dir, bsz = batch_size, seed = seed)
 
-    xs, ys = get_data(dataset_size, seq_len, key=data_key_train)
-    idx = jax.random.randint(data_key_val, (dataset_size,), 0, dataset_size)
-    xs, ys = xs.take(idx, axis=0), ys.take(idx, axis=0)
-
-    xs_train, xs_val, xs_test = xs[:int(dataset_size * 0.7)], xs[int(dataset_size * 0.7):int(dataset_size * 0.85)], \
-                                    xs[int(dataset_size * 0.85):]
-    ys_train, ys_val, ys_test = ys[:int(dataset_size * 0.7)], ys[int(dataset_size * 0.7):int(dataset_size * 0.85)], \
-                                    ys[int(dataset_size * 0.85):]
-
-    iter_data = dataloader((xs_train, ys_train), batch_size, key=loader_key)
+    # data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
+    #
+    # xs, ys = get_data(dataset_size, seq_len, key=data_key_train)
+    # idx = jax.random.randint(data_key_val, (dataset_size,), 0, dataset_size)
+    # xs, ys = xs.take(idx, axis=0), ys.take(idx, axis=0)
+    #
+    # xs_train, xs_val, xs_test = xs[:int(dataset_size * 0.7)], xs[int(dataset_size * 0.7):int(dataset_size * 0.85)], \
+    #                                 xs[int(dataset_size * 0.85):]
+    # ys_train, ys_val, ys_test = ys[:int(dataset_size * 0.7)], ys[int(dataset_size * 0.7):int(dataset_size * 0.85)], \
+    #                                 ys[int(dataset_size * 0.85):]
+    #
+    # iter_data = dataloader((xs_train, ys_train), batch_size, key=loader_key)
     # ipdb.set_trace()
 
     if cell_type in [CellType.EqxGRU]:
-        model = EqxRNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+        model = EqxRNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
     elif cell_type in [CellType.RNN]:
-        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key)
+        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
     else:
-        model = RNN(cell_type=cell_type, in_size=2, out_size=1, hidden_size=hidden_size, key=model_key,
+        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key,
                     weight_sparsity=weight_sparsity, activity_sparse=(not disable_activity_sparsity))
 
     full_model = model
-
-    # @eqx.filter_jit
-    # def compute_loss_and_outputs(model, x, y):
-    #     pred_y, outs = jax.vmap(model)(x)
-    #     # jax.debug.print("{pred_y}", pred_y=pred_y)
-    #     ## Trains with respect to binary cross-entropy
-    #     loss, _ = loss_fn(y, pred_y)
-    #     # jax.debug.print("{loss}", loss=loss)
-    #     return loss, outs
-
 
     optim = optax.adam(learning_rate)
     # For Jax pruner
@@ -251,7 +246,7 @@ def train(
 
     validation_accs = []
     cum_mean_state_density, cum_mean_M_density = 0., 0.
-    for step, (x, y) in zip(range(steps), iter_data):
+    for step, (x, y) in zip(range(steps), trn_loader):
         loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, optim, cell_type, prune)
 
         # print(outs)
@@ -272,13 +267,14 @@ def train(
         if step % 10 == 0:
             print(f"step={step}, loss={loss}")
         if step % 100 == 0:
-            pred_ys, outs = jax.vmap(full_model)(xs_val)
+            for xs_val, ys_val in val_loader:
+                pred_ys, outs = jax.vmap(full_model)(xs_val)
 
-            num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
-            acc = (num_correct / len(xs_val)).item()
-            validation_accs.append(acc)
-            if use_wandb:
-                wandb.log(dict(validation=dict(step=step, accuracy=acc)))
+                num_correct = jnp.sum((pred_ys > 0.5) == ys_val)
+                acc = (num_correct / len(xs_val)).item()
+                validation_accs.append(acc)
+                if use_wandb:
+                    wandb.log(dict(validation=dict(step=step, accuracy=acc)))
             print(f"step={step}, validation_accuracy={acc}")
             if prune:
                 print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
@@ -286,13 +282,14 @@ def train(
                 print("=================== Reached required accuracy")
                 break
 
-    pred_ys, outs = jax.vmap(full_model)(xs_test)
+    for xs_test, ys_test in tst_loader:
+        pred_ys, outs = jax.vmap(full_model)(xs_test)
 
-    num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
-    final_accuracy = (num_correct / len(xs_test)).item()
-    if use_wandb:
-        wandb.log(dict(test=dict(accuracy=final_accuracy)))
-    print(f"test_accuracy={final_accuracy}")
+        num_correct = jnp.sum((pred_ys > 0.5) == ys_test)
+        final_accuracy = (num_correct / len(xs_test)).item()
+        if use_wandb:
+            wandb.log(dict(test=dict(accuracy=final_accuracy)))
+        print(f"test_accuracy={final_accuracy}")
 
 
 if __name__ == '__main__':
