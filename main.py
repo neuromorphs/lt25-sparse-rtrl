@@ -320,6 +320,7 @@ if __name__ == '__main__':
                        prune=args.prune, cell_type=CellType.EGRU)
     # config = ml_collections.ConfigDict(config_dict)
 
+    pruner = None
     if args.prune:
         sparsity_config_dict = dict(
             algorithm='magnitude',
