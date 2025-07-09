@@ -11,13 +11,13 @@ dependencies = [
     "equinox",
     "optax",
     "pyyaml",
-    "jax[cpu]>=0.6.2",
     "ipdb>=0.13.13",
     "simrecorder",
     "wandb>=0.21.0",
     "ml-collections>=1.1.0",
-    "jaxpruner",
     "haliax",
+    "jaxpruner",
+    "jax[cuda12]",
 ]
 
 [tool.uv]
@@ -26,8 +26,8 @@ dependencies = [
 sdict = { url = "https://github.com/IGITUGraz/sdict/archive/master.zip" }
 simmanager = { url = "https://github.com/IGITUGraz/SimManager/archive/refs/tags/v0.8.4.zip" }
 simrecorder = { url = "https://github.com/IGITUGraz/SimRecorder/archive/master.zip" }
-jaxpruner = { path = "../jaxpruner", editable = true }
 haliax = { git = "https://github.com/stanford-crfm/haliax.git" }
+jaxpruner = { git = "https://github.com/google-research/jaxpruner.git" }
 
 [tool.hatch.build.targets.sdist]
 include = ["sparse_rtrl"]
