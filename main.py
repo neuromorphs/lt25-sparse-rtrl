@@ -25,11 +25,15 @@ import wandb
 from data import get_data, dataloader
 from models import EqxRNN, RNN, CellType
 
+
+
+
 @eqx.filter_jit
 def loss_fn(y, pred_y):
     # Trains with respect to binary cross-entropy
     l = -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y))
     return l, l
+
 
 @eqx.filter_jit
 def compute_loss_and_outputs(model, x, y):
@@ -40,9 +44,11 @@ def compute_loss_and_outputs(model, x, y):
     # jax.debug.print("{loss}", loss=loss)
     return loss, outs
 
+
 @eqx.filter_value_and_grad(has_aux=True)
 def compute_loss_and_grads(model, x, y):
     return compute_loss_and_outputs(model, x, y)
+
 
 @eqx.filter_jit
 def compute_influence_matrix(carry, inp):
@@ -71,6 +77,9 @@ def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
     # loss, full_model, opt_state, outs, sparsity
     return loss, full_model, opt_state, outs, (time_state_sparsity, time_state_sparsity)
 
+
+# Important for efficiency whenever you use JAX: wrap everything into a single JIT
+# region.
 @eqx.filter_jit
 def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
 
@@ -184,7 +193,7 @@ def train(
         seq_len=17,
         batch_size=32,
         learning_rate=3e-3,
-        steps=10000,
+        steps=1700,
         hidden_size=16,
         seed=5678,
         weight_sparsity=0.,
@@ -271,6 +280,8 @@ def train(
 
         if step % 10 == 0:
             print(f"step={step}, loss={loss}")
+            if prune:
+                print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
         if step % 100 == 0:
             pred_ys, outs = jax.vmap(full_model)(xs_val)
 
@@ -280,11 +291,9 @@ def train(
             if use_wandb:
                 wandb.log(dict(validation=dict(step=step, accuracy=acc)))
             print(f"step={step}, validation_accuracy={acc}")
-            if prune:
-                print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
-            if jnp.mean(jnp.array(validation_accs[-3:])) > 0.99:
+            if jnp.mean(jnp.array(validation_accs[-3:])) > 0.999:
                 print("=================== Reached required accuracy")
-                break
+                # break
 
     pred_ys, outs = jax.vmap(full_model)(xs_test)
 
