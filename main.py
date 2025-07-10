@@ -86,7 +86,7 @@ def prep_batch(batch: tuple,
 @eqx.filter_jit
 def loss_fn(y, pred_y):
     one_hot_label = jax.nn.one_hot(y, num_classes=pred_y.shape[1])
-    l =  -np.sum(one_hot_label * pred_y)
+    l =  -np.sum(one_hot_label * jnp.log(pred_y))
     # # Trains with respect to binary cross-entropy
     # l = -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y))
     return l, l
@@ -328,7 +328,7 @@ def train(
                 wandb.log(dict(train=data))
 
             if step % 10 == 0:
-                print(f"step={step}, loss={loss}")
+                print(f"epoch={epoch}, step={step}, loss={loss}")
 
         va = []
         for batch_val in val_loader:
@@ -344,7 +344,7 @@ def train(
         validation_accs.append(acc)
         if use_wandb:
             wandb.log(dict(validation=dict(step=step, accuracy=acc)))
-        print(f"step={step}, validation_accuracy={acc}")
+        print(f"epoch={epoch}, step={step}, validation_accuracy={acc}")
         if prune:
             print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
         if jnp.mean(jnp.array(validation_accs[-3:])) > 0.99:
@@ -387,7 +387,7 @@ if __name__ == '__main__':
         raise RuntimeError(f"Unknown model {cell_type}")
 
     config_dict = dict(seed=args.seed,
-                       cell_type=cell_type, hidden_size=128,
+                       cell_type=cell_type, hidden_size=[64, 64],
                        weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
                        prune=args.prune,
                        use_wandb=args.wandb,
