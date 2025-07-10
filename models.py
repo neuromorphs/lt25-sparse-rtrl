@@ -225,39 +225,6 @@ class CellType(Enum):
     EGRU = 'egru'
 
 
-class EqxRNN(eqx.Module):
-    cell: eqx.Module
-    linear: eqx.nn.Linear
-    hidden_size: int = eqx.field(static=True)
-
-    # init_fn: Callable
-    # apply_fn: Callable
-
-    def __init__(self, cell_type, in_size, out_size, hidden_size, *, key):
-        ckey, lkey = jrandom.split(key)
-
-        self.hidden_size = hidden_size
-
-        if cell_type == CellType.EqxGRU:
-            self.cell = eqx.nn.GRUCell(in_size, hidden_size, key=ckey)
-        else:
-            raise RuntimeError(f"Unknown cell type {cell_type}")
-
-        self.linear = eqx.nn.Linear(hidden_size, out_size, key=lkey)
-
-    def __call__(self, input):
-        hidden = jnp.zeros((self.hidden_size,))
-
-        def f(carry, inp):
-            c = self.cell(inp, carry)
-            return c, c
-
-        final_state, outs = lax.scan(f, hidden, input)
-
-        # sigmoid because we're performing binary classification
-        return jax.nn.sigmoid(self.linear(final_state)), outs
-
-
 class RNN(eqx.Module):
     cells: list[eqx.Module]
 
@@ -284,43 +251,48 @@ class RNN(eqx.Module):
 
         if isinstance(hidden_size, int):
             print(f"Initialising cell with input {in_size} and hidden size {hidden_size}")
-            if cell_type == CellType.RNN:
-                cell = RNNCell(in_size, hidden_size, key=ckey, **kwargs)
-            elif cell_type == CellType.EGRU:
-                cell = EGRUCell(in_size, hidden_size, key=ckey, **kwargs)
-            else:
-                raise RuntimeError(f"Unknown cell type {cell_type}")
-            self.cells = [cell]
-            self.linear = eqx.nn.Linear(hidden_size, out_size, key=lkey)
-        elif isinstance(hidden_size, list):
-            self.cells = []
-            for h in hidden_size:
-                print(f"Initialising cell with input {in_size} and hidden size {h}")
-                if cell_type == CellType.RNN:
-                    cell = RNNCell(in_size, h, key=ckey, **kwargs)
-                elif cell_type == CellType.EGRU:
-                    cell = EGRUCell(in_size, h, key=ckey, **kwargs)
-                else:
-                    raise RuntimeError(f"Unknown cell type {cell_type}")
-                self.cells.append(cell)
-                in_size = h
+            hidden_size = [hidden_size]
 
-            self.linear = eqx.nn.Linear(hidden_size[-1], out_size, key=lkey)
+        self.cells = []
+        for h in hidden_size:
+            print(f"Initialising cell with input {in_size} and hidden size {h}")
+            match cell_type:
+                case CellType.RNN:
+                    cell = RNNCell(in_size, h, key=ckey, **kwargs)
+                case CellType.EGRU:
+                    cell = EGRUCell(in_size, h, key=ckey, **kwargs)
+                case CellType.EqxGRU:
+                    cell = eqx.nn.GRUCell(in_size, h, key=ckey, **kwargs)
+                case _:
+                    raise RuntimeError(f"Unknown cell type {cell_type}")
+            self.cells.append(cell)
+            in_size = h
+
+        self.linear = eqx.nn.Linear(hidden_size[-1], out_size, key=lkey)
         self.hidden_size = hidden_size
 
     def __call__(self, input_):
         final_state, outs = None, None
         for cell in self.cells:
-            hidden = cell.init_carry()
 
-            def f(carry, inp):
-                carry, out = cell(inp, carry)
-                return carry, out
+            if isinstance(cell, eqx.nn.GRUCell):
+                hidden = jnp.zeros((cell.hidden_size,))
+                def f(carry, inp):
+                    c = cell(inp, carry)
+                    return c, c
+            else:
+                hidden = cell.init_carry()
+                def f(carry, inp):
+                    carry, out = cell(inp, carry)
+                    return carry, out
 
             os_ = None
             if isinstance(cell, RNNCell):
                 final_state, outs = lax.scan(f, hidden, input_)
                 os_, _ = outs
+            if isinstance(cell, eqx.nn.GRUCell):
+                final_state, outs = lax.scan(f, hidden, input_)
+                os_ = outs
             elif isinstance(cell, EGRUCell):
                 (h, c, o, i), outs = lax.scan(f, hidden, input_)
                 final_state = h

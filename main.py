@@ -25,7 +25,7 @@ import wandb
 
 from dataloaders.dataloading import create_speechcommands35_classification_dataset, create_toy_classification_dataset
 # from data import get_data, dataloader
-from models import EqxRNN, RNN, CellType
+from models import RNN, CellType
 
 from typing import Any, Tuple
 
@@ -129,7 +129,11 @@ def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
     params = haliax.state_dict.from_state_dict(params, trainable_params)
     full_model = eqx.combine(params, static)
 
-    time_state_sparsity = jnp.mean(outs[0] == 0., axis=2)
+    time_state_sparsity = None
+    if cell_type in [CellType.EqxGRU]:
+        time_state_sparsity = jnp.mean(outs == 0., axis=2)
+    elif cell_type in [CellType.EGRU]:
+        time_state_sparsity = jnp.mean(outs[0] == 0., axis=2)
     # loss, full_model, opt_state, outs, sparsity
 
     return loss, full_model, opt_state, outs, (time_state_sparsity, time_state_sparsity)
@@ -177,13 +181,15 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     # jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
     # jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
-    time_state_sparsity = jnp.mean(outs[0] == 0., axis=2)
-    time_J_sparsity = jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.), axis=(2, 3, 4))
 
     if cell_type in [CellType.EqxGRU]:
         final_state = outs[:, -1]
+        time_state_sparsity = jnp.mean(outs == 0., axis=2)
+        time_J_sparsity = None
     else:
         final_state = outs[0][:, -1]
+        time_state_sparsity = jnp.mean(outs[0] == 0., axis=2)
+        time_J_sparsity = jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.), axis=(2, 3, 4))
     Jloss, (loss, lg) = jax.vmap(partial(jax.jacfwd(ls, has_aux=True, argnums=1), full_model))(final_state, y)
 
     def calc_grad(M):
@@ -276,7 +282,7 @@ def train(
     _, model_key = jrandom.split(jrandom.PRNGKey(seed), 2)
 
     if cell_type in [CellType.EqxGRU]:
-        model = EqxRNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
+        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
     elif cell_type in [CellType.RNN]:
         model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
     else:
@@ -369,10 +375,19 @@ if __name__ == '__main__':
     argparser.add_argument('--prune', action='store_true')
     argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='bptt')
     argparser.add_argument('--dataset', type=str, choices=['toy', 'speech'], default='toy')
+    argparser.add_argument('--model', type=str, choices=['gru', 'egru'], default='egru')
+
     args = argparser.parse_args()
 
+    if args.model == 'gru':
+        cell_type = CellType.EqxGRU
+    elif args.model == 'egru':
+        cell_type = CellType.EGRU
+    else:
+        raise RuntimeError(f"Unknown model {cell_type}")
+
     config_dict = dict(seed=args.seed,
-                       cell_type=CellType.EGRU, hidden_size=128,
+                       cell_type=cell_type, hidden_size=128,
                        weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
                        prune=args.prune,
                        use_wandb=args.wandb,
