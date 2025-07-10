@@ -6,8 +6,6 @@
 *.bak.py
 !/ipynbs
 !/ipynbs/*.ipynb
-!pyproject.toml
-!uv.lock
 !README.md
 !/dataloaders
 !/dataloaders/*.py

@@ -25,7 +25,7 @@ def get_data(dataset_size, seq_len, *, key):
     offset = jrandom.uniform(key, (dataset_size, 1), minval=0, maxval=2 * math.pi)
     x1 = jnp.sin(t + offset) / (1 + t)
     x2 = jnp.cos(t + offset) / (1 + t)
-    y = jnp.ones((dataset_size, 1))
+    y = jnp.ones((dataset_size, ))
 
     half_dataset_size = dataset_size // 2
     x1 = x1.at[:half_dataset_size].multiply(-1)

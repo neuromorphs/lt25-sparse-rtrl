@@ -1,7 +1,13 @@
+import numpy as np
 import torch
+import jax
+import jax.random as jrandom
 from pathlib import Path
 import os
 from typing import Callable, Optional, TypeVar, Dict, Tuple, List, Union
+
+from dataloaders.toy import get_data, dataloader
+from torch.utils.data import Dataset
 
 DEFAULT_CACHE_DIR_ROOT = Path('./cache_dir/')
 
@@ -386,6 +392,56 @@ def create_pmnist_classification_dataset(cache_dir: Union[str, Path] = DEFAULT_C
 	aux_loaders = {}
 	return trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE
 
+def create_toy_classification_dataset(dataset_size:int, seq_len:int, bsz: int = 50, seed: int = 42) -> ReturnType:
+	"""
+	AG inexplicably moved away from using a cache dir...  Grumble.
+	The `cache_dir` will effectively be ./raw_datasets/speech_commands/0.0.2 .
+
+	See abstract template.
+	"""
+
+	class ArrayDataset(Dataset):
+		def __init__(self, xs, ys):
+			self.xs = np.array(xs)
+			self.ys = np.array(ys)
+
+		def __len__(self):
+			return len(self.xs)
+
+		def __getitem__(self, idx):
+			return self.xs[idx], self.ys[idx]
+
+	data_key_train, data_key_val, data_key_test, loader_key, model_key = jrandom.split(jrandom.PRNGKey(seed), 5)
+	xs, ys = get_data(dataset_size, seq_len, key=data_key_train)
+	idx = jax.random.randint(data_key_val, (dataset_size,), 0, dataset_size)
+	xs, ys = xs.take(idx, axis=0), ys.take(idx, axis=0)
+
+	xs_train, xs_val, xs_test = xs[:int(dataset_size * 0.7)], xs[int(dataset_size * 0.7):int(dataset_size * 0.85)], \
+	                                xs[int(dataset_size * 0.85):]
+	ys_train, ys_val, ys_test = ys[:int(dataset_size * 0.7)], ys[int(dataset_size * 0.7):int(dataset_size * 0.85)], \
+	                                ys[int(dataset_size * 0.85):]
+	#
+	rng = torch.Generator()
+	rng.manual_seed(seed)
+	trn_loader = torch.utils.data.DataLoader(dataset=ArrayDataset(xs_train, ys_train), batch_size=bsz, shuffle=True,
+									   drop_last=True, generator=rng)
+	rng = torch.Generator()
+	rng.manual_seed(seed)
+	val_loader = torch.utils.data.DataLoader(dataset=ArrayDataset(xs_val, ys_val), batch_size=bsz, shuffle=True,
+											 drop_last=True, generator=rng)
+	rng = torch.Generator()
+	rng.manual_seed(seed)
+	tst_loader = torch.utils.data.DataLoader(dataset=ArrayDataset(xs_test, ys_test), batch_size=bsz, shuffle=True,
+											 drop_last=True, generator=rng)
+
+	N_CLASSES = 2
+	SEQ_LENGTH = seq_len
+	IN_DIM = xs.shape[-1]
+	TRAIN_SIZE = dataset_size
+
+	aux_loaders = {}
+
+	return trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE
 
 Datasets = {
 	# Other loaders.
@@ -403,4 +459,7 @@ Datasets = {
 
 	# Speech.
 	"speech35-classification": create_speechcommands35_classification_dataset,
+
+	# Toy
+	"toy-classification": create_toy_classification_dataset,
 }

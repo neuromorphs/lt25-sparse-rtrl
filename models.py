@@ -33,9 +33,9 @@ class RNNCell(Module):
     weight_ih: Array
     weight_hh: Array
     bias: Optional[Array]
-    input_size: int = static_field()
-    hidden_size: int = static_field()
-    output_jac: bool = static_field()
+    input_size: int = eqx.field(static=True)
+    hidden_size: int = eqx.field(static=True)
+    output_jac: bool = eqx.field(static=True)
 
     def __init__(
             self,
@@ -91,14 +91,14 @@ class RNNCell(Module):
 class EGRUCell(Module):
     weight_ih: Array
     weight_hh: Array
-    mask_hh: Array = static_field()
     threshold: Array
     bias: Optional[Array]
-    input_size: int = static_field()
-    hidden_size: int = static_field()
-    alpha: float = static_field()
-    output_jac: bool = static_field()
-    output_fn: Callable = static_field()
+    mask_hh: Array = eqx.field(static=True)
+    input_size: int = eqx.field(static=True)
+    hidden_size: int = eqx.field(static=True)
+    alpha: float = eqx.field(static=True)
+    output_jac: bool = eqx.field(static=True)
+    output_fn: Callable = eqx.field(static=True)
 
     def __init__(
             self,
@@ -226,9 +226,9 @@ class CellType(Enum):
 
 
 class EqxRNN(eqx.Module):
-    hidden_size: int = static_field()
     cell: eqx.Module
     linear: eqx.nn.Linear
+    hidden_size: int = eqx.field(static=True)
 
     # init_fn: Callable
     # apply_fn: Callable
@@ -259,11 +259,13 @@ class EqxRNN(eqx.Module):
 
 
 class RNN(eqx.Module):
-    hidden_size: int = static_field
-    cell: eqx.Module
+    cells: list[eqx.Module]
 
-    ## NOTE: Wan't to keep linear layer here so that the RNN class is always compatible with eqx.* RNNs
+    ## NOTE: Want to keep linear layer here so that the RNN class is always compatible with eqx.* RNNs
     linear: eqx.nn.Linear
+
+    hidden_size: int = eqx.field(static=True)
+    in_size: int = eqx.field(static=True)
 
     # init_fn: Callable
     # apply_fn: Callable
@@ -272,37 +274,59 @@ class RNN(eqx.Module):
                 cell_type, 
                  in_size: int, 
                  out_size: int, 
-                 hidden_size: int, 
+                 hidden_size: int | list[int],
                 *, 
                 key: Optional["jax.random.PRNGKey"],
                 **kwargs
                  ):
         ckey, lkey = jrandom.split(key)
+        self.in_size = in_size
 
+        if isinstance(hidden_size, int):
+            print(f"Initialising cell with input {in_size} and hidden size {hidden_size}")
+            if cell_type == CellType.RNN:
+                cell = RNNCell(in_size, hidden_size, key=ckey, **kwargs)
+            elif cell_type == CellType.EGRU:
+                cell = EGRUCell(in_size, hidden_size, key=ckey, **kwargs)
+            else:
+                raise RuntimeError(f"Unknown cell type {cell_type}")
+            self.cells = [cell]
+            self.linear = eqx.nn.Linear(hidden_size, out_size, key=lkey)
+        elif isinstance(hidden_size, list):
+            self.cells = []
+            for h in hidden_size:
+                print(f"Initialising cell with input {in_size} and hidden size {h}")
+                if cell_type == CellType.RNN:
+                    cell = RNNCell(in_size, h, key=ckey, **kwargs)
+                elif cell_type == CellType.EGRU:
+                    cell = EGRUCell(in_size, h, key=ckey, **kwargs)
+                else:
+                    raise RuntimeError(f"Unknown cell type {cell_type}")
+                self.cells.append(cell)
+                in_size = h
+
+            self.linear = eqx.nn.Linear(hidden_size[-1], out_size, key=lkey)
         self.hidden_size = hidden_size
 
-        if cell_type == CellType.RNN:
-            self.cell = RNNCell(in_size, hidden_size, key=ckey, **kwargs)
-        elif cell_type == CellType.EGRU:
-            self.cell = EGRUCell(in_size, hidden_size, key=ckey, **kwargs)
-        else:
-            raise RuntimeError(f"Unknown cell type {cell_type}")
+    def __call__(self, input_):
+        final_state, outs = None, None
+        for cell in self.cells:
+            hidden = cell.init_carry()
 
-        self.linear = eqx.nn.Linear(hidden_size, out_size, key=lkey)
+            def f(carry, inp):
+                carry, out = cell(inp, carry)
+                return carry, out
 
-    def __call__(self, input):
-        hidden = self.cell.init_carry()
+            os_ = None
+            if isinstance(cell, RNNCell):
+                final_state, outs = lax.scan(f, hidden, input_)
+                os_, _ = outs
+            elif isinstance(cell, EGRUCell):
+                (h, c, o, i), outs = lax.scan(f, hidden, input_)
+                final_state = h
+                hs_, cs_, os_, is_, _, _, _, _ = outs
+            input_ = os_
 
-        def f(carry, inp):
-            carry, out = self.cell(inp, carry)
-            return carry, out
-
-        if isinstance(self.cell, RNNCell):
-            final_state, outs = lax.scan(f, hidden, input)
-        elif isinstance(self.cell, EGRUCell):
-            (h, c, o, i), outs = lax.scan(f, hidden, input)
-            final_state = h
-
-        pred = jax.nn.sigmoid(self.linear(final_state))
+        pred = jax.nn.softmax(self.linear(final_state))
         return pred, outs
 

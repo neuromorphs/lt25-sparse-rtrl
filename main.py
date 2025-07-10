@@ -23,7 +23,7 @@ import ml_collections
 
 import wandb
 
-from dataloaders.dataloading import create_speechcommands35_classification_dataset
+from dataloaders.dataloading import create_speechcommands35_classification_dataset, create_toy_classification_dataset
 # from data import get_data, dataloader
 from models import EqxRNN, RNN, CellType
 
@@ -128,8 +128,10 @@ def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
     ## jax pruner
     params = haliax.state_dict.from_state_dict(params, trainable_params)
     full_model = eqx.combine(params, static)
+
     time_state_sparsity = jnp.mean(outs[0] == 0., axis=2)
     # loss, full_model, opt_state, outs, sparsity
+
     return loss, full_model, opt_state, outs, (time_state_sparsity, time_state_sparsity)
 
 @eqx.filter_jit
@@ -241,8 +243,6 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
 
 def train(
         make_step,
-        dataset_size=10000,
-        seq_len=17,
         batch_size=50,
         learning_rate=3e-3,
         steps=10000,
@@ -254,10 +254,10 @@ def train(
         prune=False,
         pruner=None,
         use_wandb=False,
+        dataset='speech',
+        dataset_size = 10000,
+        seq_len = 17,
 ):
-    """
-    Trains with RTRL
-    """
     print(f"Seed: {seed}")
     if use_wandb:
         wandb.init(project="sparse-rtrl", entity="anands",
@@ -265,23 +265,15 @@ def train(
                                hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity,
                                disable_activity_sparsity=disable_activity_sparsity, cell_type=cell_type.value))
 
-    cache_dir = './raw_datasets/speech_commands/0.0.2/SpeechCommands/processed_data'
-    trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE = \
-	        create_speechcommands35_classification_dataset(cache_dir, bsz = batch_size, seed = seed)
+    if dataset == 'speech':
+        cache_dir = './raw_datasets/speech_commands/0.0.3/SpeechCommands/processed_data'
+        trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE = \
+                create_speechcommands35_classification_dataset(cache_dir, bsz = batch_size, seed = seed)
+    elif dataset == 'toy':
+        trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE = \
+            create_toy_classification_dataset(dataset_size, seq_len, bsz = batch_size, seed = seed)
 
     _, model_key = jrandom.split(jrandom.PRNGKey(seed), 2)
-    #
-    # xs, ys = get_data(dataset_size, seq_len, key=data_key_train)
-    # idx = jax.random.randint(data_key_val, (dataset_size,), 0, dataset_size)
-    # xs, ys = xs.take(idx, axis=0), ys.take(idx, axis=0)
-    #
-    # xs_train, xs_val, xs_test = xs[:int(dataset_size * 0.7)], xs[int(dataset_size * 0.7):int(dataset_size * 0.85)], \
-    #                                 xs[int(dataset_size * 0.85):]
-    # ys_train, ys_val, ys_test = ys[:int(dataset_size * 0.7)], ys[int(dataset_size * 0.7):int(dataset_size * 0.85)], \
-    #                                 ys[int(dataset_size * 0.85):]
-    #
-    # iter_data = dataloader((xs_train, ys_train), batch_size, key=loader_key)
-    # ipdb.set_trace()
 
     if cell_type in [CellType.EqxGRU]:
         model = EqxRNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
@@ -307,47 +299,50 @@ def train(
     validation_accs = []
     cum_mean_state_density, cum_mean_M_density = 0., 0.
     # for step, (x, y) in zip(range(steps), trn_loader):
-    for step, batch in enumerate(tqdm(trn_loader)):
-        x, y, integration_times = prep_batch(batch, SEQ_LENGTH, IN_DIM)
+    n_epochs = 10
+    for epoch in range(n_epochs):
+        for step, batch in enumerate(tqdm(trn_loader)):
+            x, y, integration_times = prep_batch(batch, SEQ_LENGTH, IN_DIM)
 
-        loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, optim, cell_type, prune)
+            loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, optim, cell_type, prune)
 
-        # print(outs)
-        loss = loss.item()
-        mean_state_sparsity = jnp.mean(sparsity[0])
-        mean_M_sparsity = jnp.mean(sparsity[1])
-        cum_mean_state_density += (1 - mean_state_sparsity)
-        cum_mean_M_density += (1 - mean_M_sparsity)
-        data = dict(step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
-                    mean_state_sparsity=mean_state_sparsity,
-                    mean_M_sparsity=mean_M_sparsity,
-                    cum_mean_state_density=cum_mean_state_density,
-                    cum_mean_M_density=cum_mean_M_density,
-                    mean_sq_M_sparsity=jnp.mean(sparsity[1] ** 2))
-        if use_wandb:
-            wandb.log(dict(train=data))
-
-        if step % 10 == 0:
-            print(f"step={step}, loss={loss}")
-        va = []
-        if step % 100 == 0:
-            for batch_val in val_loader:
-                xs_val, ys_val, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
-                pred_ys, outs = jax.vmap(full_model)(xs_val)
-
-                num_correct = jnp.sum(pred_ys.argmax(axis=1) == ys_val)
-                # ipdb.set_trace()
-                acc = (num_correct / len(xs_val)).item()
-                va.append(acc)
-            acc = np.mean(va)
-            validation_accs.append(acc)
+            # print(outs)
+            loss = loss.item()
+            mean_state_sparsity = jnp.mean(sparsity[0])
+            mean_M_sparsity = jnp.mean(sparsity[1])
+            cum_mean_state_density += (1 - mean_state_sparsity)
+            cum_mean_M_density += (1 - mean_M_sparsity)
+            data = dict(epoch=epoch, step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
+                        mean_state_sparsity=mean_state_sparsity,
+                        mean_M_sparsity=mean_M_sparsity,
+                        cum_mean_state_density=cum_mean_state_density,
+                        cum_mean_M_density=cum_mean_M_density,
+                        mean_sq_M_sparsity=jnp.mean(sparsity[1] ** 2))
             if use_wandb:
-                wandb.log(dict(validation=dict(step=step, accuracy=acc)))
-            print(f"step={step}, validation_accuracy={acc}")
-            if prune:
-                print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
-            if jnp.mean(jnp.array(validation_accs[-3:])) > 0.99:
-                print("=================== Reached required accuracy")
+                wandb.log(dict(train=data))
+
+            if step % 10 == 0:
+                print(f"step={step}, loss={loss}")
+
+        va = []
+        for batch_val in val_loader:
+            xs_val, ys_val, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
+            pred_ys, outs = jax.vmap(full_model)(xs_val)
+
+            num_correct = jnp.sum(pred_ys.argmax(axis=1) == ys_val)
+            # ipdb.set_trace()
+            acc = (num_correct / len(xs_val)).item()
+            va.append(acc)
+
+        acc = np.mean(va)
+        validation_accs.append(acc)
+        if use_wandb:
+            wandb.log(dict(validation=dict(step=step, accuracy=acc)))
+        print(f"step={step}, validation_accuracy={acc}")
+        if prune:
+            print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
+        if jnp.mean(jnp.array(validation_accs[-3:])) > 0.99:
+            print("=================== Reached required accuracy")
 
     ta = []
     for batch_tst in tst_loader:
@@ -372,7 +367,8 @@ if __name__ == '__main__':
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
     argparser.add_argument('--prune', action='store_true')
-    argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='rtrl')
+    argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='bptt')
+    argparser.add_argument('--dataset', type=str, choices=['toy', 'speech'], default='toy')
     args = argparser.parse_args()
 
     config_dict = dict(seed=args.seed,
@@ -380,6 +376,7 @@ if __name__ == '__main__':
                        weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
                        prune=args.prune,
                        use_wandb=args.wandb,
+                       dataset=args.dataset,
                        )
     # config = ml_collections.ConfigDict(config_dict)
 
@@ -398,10 +395,10 @@ if __name__ == '__main__':
         # pruner = jaxpruner.MagnitudePruning(sparsity_distribution_fn=sparsity_distribution)
         pruner = jaxpruner.create_updater_from_config(sparsity_config)
 
-    # with launch_ipdb_on_exception():
-    if args.method == 'rtrl':
-        train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
-    elif args.method == 'bptt':
-        train(make_step=make_step_bptt, pruner=pruner, **config_dict)
-    else:
-        raise RuntimeError(f"Unknown method {args.method}")
+    with launch_ipdb_on_exception():
+        if args.method == 'rtrl':
+            train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
+        elif args.method == 'bptt':
+            train(make_step=make_step_bptt, pruner=pruner, **config_dict)
+        else:
+            raise RuntimeError(f"Unknown method {args.method}")
