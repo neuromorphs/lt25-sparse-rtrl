@@ -169,15 +169,15 @@ class EGRUCell(Module):
             self.output_fn = lambda x: x
 
     def __call__(
-            self, input_: Array, state: Tuple[Array, Array, Array], *, key: Optional["jax.random.PRNGKey"] = None
+            self, input_: Array, state: Tuple[Array, Array, Array, Array], *, key: Optional["jax.random.PRNGKey"] = None
     ):
         # thr = jnn.sigmoid(self.threshold)
         thr = jax.lax.clamp(0., self.threshold, 1.)
-        h, c, o, i = state
+        h, c, o = state
         hidden = h # o * c
         c_reset = c - (o * thr)
 
-        iu, ir, ic = jnp.split(i, 3, -1)
+        # iu, ir, ic = jnp.split(i, 3, -1)
 
         lin_x = self.weight_ih @ input_ + self.bias
         xu, xr, xc = jnp.split(lin_x, 3, -1)
@@ -195,22 +195,22 @@ class EGRUCell(Module):
             hu, hr, hc = jnp.split(lin_h, 3, -1)
             # bu, br, bc = jnp.split(model.bias, 3)
 
-            new_ir = model.alpha * ir + (1 - model.alpha) * (xr + hr) #  + br)
-            new_r = jnn.sigmoid(new_ir)
+            # new_ir = model.alpha * ir + (1 - model.alpha) * (xr + hr) #  + br)
+            new_r = jnn.sigmoid(xr + hr)
 
-            new_ic = model.alpha * ic + (1 - model.alpha) * (xc + new_r * hc) #  + bc)
-            new_z = jnn.tanh(new_ic)
+            # new_ic = model.alpha * ic + (1 - model.alpha) * (xc + new_r * hc) #  + bc)
+            new_z = jnn.tanh(xc + new_r * hc)
 
-            new_iu = model.alpha * iu + (1 - model.alpha) * (xu + hu) #  + bu)
-            new_u = jnn.sigmoid(new_iu)
+            # new_iu = model.alpha * iu + (1 - model.alpha) * (xu + hu) #  + bu)
+            new_u = jnn.sigmoid(xu + hu)
             new_c = new_u * c_reset + (1- new_u) * new_z
 
             new_o = self.output_fn(new_c - thr)
             new_h = new_o * new_c
-            new_i = jnp.concatenate([new_iu, new_ir, new_ic], -1)
+            # new_i = jnp.concatenate([new_iu, new_ir, new_ic], -1)
             # new_h = new_o
 
-            return (new_h, new_c, new_o, new_i), (new_h, new_c, new_o, new_i)
+            return (new_h, new_c, new_o), (new_h, new_c, new_o)
 
         # fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
         # new_h, new_c, new_o, new_i = fn(hidden, self)
@@ -220,21 +220,21 @@ class EGRUCell(Module):
         else: 
             jac = fn
 
-        res, (new_h, new_c, new_o, new_i) = jac(hidden, self)
+        res, (new_h, new_c, new_o) = jac(hidden, self)
 
         if not self.output_jac:
-            res = (None, None), (None, None), (None, None), (None, None)
+            res = (None, None), (None, None), (None, None)
 
-        (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi) = res
+        (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo) = res
 
         # import ipdb
         # ipdb.set_trace()
 
         # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
-        return (new_h, new_c, new_o, new_i), (new_h, new_c, new_o, new_i, (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi))
+        return (new_h, new_c, new_o), (new_h, new_c, new_o, (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo))
 
     def init_carry(self):
-        return jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,)), jnp.zeros((3 * self.hidden_size,))
+        return jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,))
 
 
 class CellType(Enum):
@@ -312,9 +312,9 @@ class RNN(eqx.Module):
                 final_state, outs = lax.scan(f, hidden, input_)
                 os_ = outs
             elif isinstance(cell, EGRUCell):
-                (h, c, o, i), outs = lax.scan(f, hidden, input_)
+                (h, c, o), outs = lax.scan(f, hidden, input_)
                 final_state = h
-                hs_, cs_, os_, is_, _, _, _, _ = outs
+                hs_, cs_, os_, _, _, _ = outs
             input_ = os_
 
         pred = jax.nn.softmax(self.linear(final_state))
