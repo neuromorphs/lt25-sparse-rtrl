@@ -13,6 +13,8 @@ from jax import custom_jvp
 from jaxtyping import Array
 
 
+
+
 @custom_jvp
 def event_fn(x):
     return jnp.heaviside(x, x)
@@ -98,9 +100,14 @@ class EGRUCell(Module):
     # mask_hh: Array = eqx.field(static=True)
     input_size: int = eqx.field(static=True)
     hidden_size: int = eqx.field(static=True)
-    alpha: float = eqx.field(static=True)
     output_jac: bool = eqx.field(static=True)
     output_fn: Callable = eqx.field(static=True)
+
+    def c_to_oh(self, c):
+        thr = jax.lax.clamp(0., self.threshold, 1.)
+        o = self.output_fn(c - thr)
+        h = o * c
+        return o, h, thr
 
     def __init__(
             self,
@@ -114,8 +121,6 @@ class EGRUCell(Module):
             **kwargs
     ):
         super().__init__(**kwargs)
-
-        self.alpha = 0.001
 
         ihkey, hhkey, bkey, thkey = jrandom.split(key, 4)
         # lim = math.sqrt(1 / hidden_size)
@@ -169,13 +174,11 @@ class EGRUCell(Module):
             self.output_fn = lambda x: x
 
     def __call__(
-            self, input_: Array, state: Tuple[Array, Array, Array, Array], *, key: Optional["jax.random.PRNGKey"] = None
+            self, input_: Array, state: Array, *, key: Optional["jax.random.PRNGKey"] = None
     ):
-        # thr = jnn.sigmoid(self.threshold)
-        thr = jax.lax.clamp(0., self.threshold, 1.)
-        h, c, o = state
-        hidden = h # o * c
-        c_reset = c - (o * thr)
+        # h, c, o = state
+        # hidden = h # o * c
+        # c_reset = c - (o * thr)
 
         # iu, ir, ic = jnp.split(i, 3, -1)
 
@@ -185,12 +188,16 @@ class EGRUCell(Module):
         w_hh = self.weight_hh
 
         # Sould pass in o & c here for RTRL to get the right gradients (I think)
-        def fn(hidden, model):
+        def fn(state, model):
+            c = state
+            o, h, thr = self.c_to_oh(c)
+            c_reset = c - (o * thr)
+
             # w_hh = model.weight_hh[model.mask_hh]
             # w_hh = jnp.where(model.mask_hh, model.weight_hh, jnp.zeros_like(model.weight_hh))
             # jax.debug.print("Percent zeros in w_hh: {m}", m=jnp.mean(jnp.isclose(w_hh, 0)))
             # w_hh = model.weight_hh
-            lin_h = w_hh @ hidden  + model.recurrent_bias
+            lin_h = w_hh @ h  + model.recurrent_bias
 
             hu, hr, hc = jnp.split(lin_h, 3, -1)
             # bu, br, bc = jnp.split(model.bias, 3)
@@ -205,12 +212,8 @@ class EGRUCell(Module):
             new_u = jnn.sigmoid(xu + hu)
             new_c = new_u * c_reset + (1- new_u) * new_z
 
-            new_o = self.output_fn(new_c - thr)
-            new_h = new_o * new_c
-            # new_i = jnp.concatenate([new_iu, new_ir, new_ic], -1)
-            # new_h = new_o
-
-            return (new_h, new_c, new_o), (new_h, new_c, new_o)
+            # return (new_h, new_c, new_o), (new_h, new_c, new_o)
+            return new_c, new_c
 
         # fn = lambda w_hh, h: (jnn.tanh(self.weight_ih @ input + w_hh @ h + self.bias))
         # new_h, new_c, new_o, new_i = fn(hidden, self)
@@ -220,21 +223,22 @@ class EGRUCell(Module):
         else: 
             jac = fn
 
-        res, (new_h, new_c, new_o) = jac(hidden, self)
+        res, new_c = jac(state, self)
 
         if not self.output_jac:
-            res = (None, None), (None, None), (None, None)
+            res = (None, None)
 
-        (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo) = res
+        Jc, bar_Mc = res
 
         # import ipdb
         # ipdb.set_trace()
 
         # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
-        return (new_h, new_c, new_o), (new_h, new_c, new_o, (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo))
+        # return (new_h, new_c, new_o), (new_h, new_c, new_o, (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo))
+        return new_c, (new_c, (Jc, bar_Mc))
 
     def init_carry(self):
-        return jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,)), jnp.zeros((self.hidden_size,))
+        return jnp.zeros((self.hidden_size,))
 
 
 class CellType(Enum):
@@ -312,9 +316,11 @@ class RNN(eqx.Module):
                 final_state, outs = lax.scan(f, hidden, input_)
                 os_ = outs
             elif isinstance(cell, EGRUCell):
-                (h, c, o), outs = lax.scan(f, hidden, input_)
+                c, outs = lax.scan(f, hidden, input_)
+                o, h, _ = cell.c_to_oh(c)
                 final_state = h
-                hs_, cs_, os_, _, _, _ = outs
+                cs_, _ = outs
+                os_, hs_, _ = cell.c_to_oh(cs_)
             input_ = os_
 
         pred = jax.nn.softmax(self.linear(final_state))

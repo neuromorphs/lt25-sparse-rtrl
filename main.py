@@ -133,7 +133,8 @@ def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
     if cell_type in [CellType.EqxGRU]:
         time_state_sparsity = jnp.mean(outs == 0., axis=2)
     elif cell_type in [CellType.EGRU]:
-        time_state_sparsity = jnp.mean(outs[0] == 0., axis=2)
+        os, _, _ = full_model.cells[0].c_to_oh(outs[0])
+        time_state_sparsity = jnp.mean(os == 0., axis=2)
     # loss, full_model, opt_state, outs, sparsity
 
     return loss, full_model, opt_state, outs, (time_state_sparsity, time_state_sparsity)
