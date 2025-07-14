@@ -86,7 +86,8 @@ def prep_batch(batch: tuple,
 @eqx.filter_jit
 def loss_fn(y, pred_y):
     one_hot_label = jax.nn.one_hot(y, num_classes=pred_y.shape[-1])
-    l =  -np.sum(one_hot_label * jnp.log(pred_y))
+    l =  -np.sum(one_hot_label * jnp.log(pred_y), axis=-1)
+    l = jnp.mean(l)
     # # Trains with respect to binary cross-entropy
     # l = -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y))
     return l, l
@@ -377,7 +378,7 @@ if __name__ == '__main__':
     argparser.add_argument('--location', type=str, choices=['mac', 'desktop', 'jusuf', 'taurus'], default='mac')
     argparser.add_argument('--weight-sparsity', type=float, default=0.0)
     argparser.add_argument('--seed', type=int, default=5678)
-    argparser.add_argument('--batch-size', type=int, default=300)
+    argparser.add_argument('--batch-size', type=int, default=100)
     argparser.add_argument('--hidden-size', type=int, action='append')
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
