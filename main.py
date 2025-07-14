@@ -204,9 +204,10 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
 def train(
         make_step,
         batch_size=50,
-        learning_rate=3e-3,
+        learning_rate=1e-3,
         steps=10000,
-        hidden_size=16,
+        hidden_size=128,
+        epochs=10,
         seed=5678,
         weight_sparsity=0.,
         disable_activity_sparsity=False,
@@ -214,9 +215,9 @@ def train(
         prune=False,
         pruner=None,
         use_wandb=False,
-        dataset='speech',
-        dataset_size=10000,
-        seq_len=17,
+        dataset='toy',
+        dataset_size = 10000,
+        seq_len = 17,
 ):
     print(f"Seed: {seed}")
     if use_wandb:
@@ -330,6 +331,7 @@ if __name__ == '__main__':
     argparser.add_argument('--weight-sparsity', type=float, default=0.0)
     argparser.add_argument('--seed', type=int, default=5678)
     argparser.add_argument('--batch-size', type=int, default=100)
+    argparser.add_argument('--epochs', type=int, default=10)
     argparser.add_argument('--hidden-size', type=int, action='append')
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
@@ -350,7 +352,7 @@ if __name__ == '__main__':
 
     config_dict = dict(seed=args.seed,
                        cell_type=cell_type,
-                       hidden_size=args.hidden_size, batch_size=args.batch_size,
+                       hidden_size=args.hidden_size, batch_size=args.batch_size, epochs=args.epochs,
                        weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
                        prune=args.prune,
                        use_wandb=args.wandb,

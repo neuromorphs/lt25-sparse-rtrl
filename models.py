@@ -1,3 +1,4 @@
+import ipdb
 import math
 from enum import Enum
 from typing import Optional, Tuple, Callable
@@ -296,7 +297,6 @@ class RNN(eqx.Module):
     def __call__(self, input_):
         final_state, outs = None, None
         for cell in self.cells:
-
             if isinstance(cell, eqx.nn.GRUCell):
                 hidden = jnp.zeros((cell.hidden_size,))
                 def f(carry, inp):
@@ -317,12 +317,16 @@ class RNN(eqx.Module):
                 os_ = outs
             elif isinstance(cell, EGRUCell):
                 c, outs = lax.scan(f, hidden, input_)
-                o, h, _ = cell.c_to_oh(c)
-                final_state = h
+                # o, h, _ = cell.c_to_oh(c)
+                # final_state = h
                 cs_, _ = outs
                 os_, hs_, _ = cell.c_to_oh(cs_)
             input_ = os_
 
+        if isinstance(cell, EGRUCell):
+            alpha = 0.9
+            tr_, _ = lax.scan(lambda carry, inp: (alpha * carry + (1 - alpha) * inp, None), jnp.zeros((cell.hidden_size)), os_)
+            final_state = tr_
         pred = jax.nn.softmax(self.linear(final_state))
         return pred, outs
 
