@@ -252,12 +252,14 @@ def train(
 
     full_model = model
 
-    clipper = optax.clip(1.0)
+    # clipper = optax.clip(1.0)
+    # optim = optax.adam(learning_rate)
+    # tx = optax.chain(
+    #         clipper,
+    #         optim
+    #         )
     optim = optax.adam(learning_rate)
-    tx = optax.chain(
-            clipper,
-            optim
-            )
+    tx = optim
     # For Jax pruner
     if prune:
         tx = pruner.wrap_optax(tx)
@@ -344,13 +346,21 @@ if __name__ == '__main__':
     argparser.add_argument('--hidden-size', type=int, action='append')
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
-    argparser.add_argument('--prune', action='store_true')
+    # argparser.add_argument('--prune', action='store_true')
+    argparser.add_argument('--prune-method', type=str, choices=['set', 'static', 'ste'])
     argparser.add_argument('--debug', action='store_true')
     argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='bptt')
     argparser.add_argument('--dataset', type=str, choices=['toy', 'speech', 'smnist'], default='toy')
     argparser.add_argument('--model', type=str, choices=['gru', 'egru'], default='egru')
 
     args = argparser.parse_args()
+
+    prune = False
+    if args.prune_method:
+        prune = True
+    else:
+        print("Not pruning")
+
 
     if args.model == 'gru':
         cell_type = CellType.EqxGRU
@@ -363,39 +373,65 @@ if __name__ == '__main__':
                        cell_type=cell_type,
                        hidden_size=args.hidden_size, batch_size=args.batch_size, epochs=args.epochs,
                        weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
-                       prune=args.prune,
+                       prune=prune,
                        use_wandb=args.wandb,
                        dataset=args.dataset,
                        )
     # config = ml_collections.ConfigDict(config_dict)
 
     pruner = None
-    if args.prune:
-        sparsity_config_dict = dict(
-            algorithm='magnitude',
-            update_freq=10,
-            update_end_step=1000,
-            update_start_step=200,
-            sparsity=0.95,
-            dist_type='erk',
-        )
+    if prune:
+        match args.prune_method:
+            case 'static':
+                print("Static sparsity")
+                sparsity_config_dict = dict(
+                    algorithm = 'static_sparse',
+                    sparsity = 0.95,
+                    # update_start_step = 10,  # 200 steps per epoch for smnist
+                    # update_end_step = 200 * args.epochs,
+                    # update_freq=10,
+                    dist_type = 'erk'
+                )
+            case 'magnitude':
+                sparsity_config_dict = dict(
+                    algorithm='magnitude',
+                    update_freq=10,
+                    update_end_step=1000,
+                    update_start_step=200,
+                    sparsity=0.95,
+                    dist_type='erk',
+                )
+            case 'ste':
+                sparsity_config_dict = dict(
+                    algorithm = 'magnitude_ste',
+                    sparsity = 0.95,
+                    update_end_step = 0,
+                    update_start_step = 0,
+                    dist_type = 'erk'
+                )
+            case 'set':
+                sparsity_config_dict = dict(
+                    algorithm = 'set',
+                    sparsity = 0.95,
+                    update_start_step = 10,  # 200 steps per epoch for smnist
+                    update_end_step = 200 * args.epochs,
+                    update_freq=10,
+                    dist_type = 'erk'
+                )
         sparsity_config = ml_collections.ConfigDict(sparsity_config_dict)
         # sparsity_distribution = partial(jaxpruner.sparsity_distributions.uniform, sparsity=0.8)
         # pruner = jaxpruner.MagnitudePruning(sparsity_distribution_fn=sparsity_distribution)
         pruner = jaxpruner.create_updater_from_config(sparsity_config)
 
+    if args.method == 'rtrl':
+        make_step=make_step_rtrl
+    elif args.method == 'bptt':
+        make_step=make_step_bptt
+    else:
+        raise RuntimeError(f"Unknown method {args.method}")
+
     if args.debug:
         with launch_ipdb_on_exception():
-            if args.method == 'rtrl':
-                train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
-            elif args.method == 'bptt':
-                train(make_step=make_step_bptt, pruner=pruner, **config_dict)
-            else:
-                raise RuntimeError(f"Unknown method {args.method}")
+            train(make_step, pruner=pruner, **config_dict)  # All right, let's run the code.
     else:
-        if args.method == 'rtrl':
-            train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
-        elif args.method == 'bptt':
-            train(make_step=make_step_bptt, pruner=pruner, **config_dict)
-        else:
-            raise RuntimeError(f"Unknown method {args.method}")
+        train(make_step, pruner=pruner, **config_dict)  # All right, let's run the code.
