@@ -377,6 +377,7 @@ if __name__ == '__main__':
     argparser.add_argument('--location', type=str, choices=['mac', 'desktop', 'jusuf', 'taurus'], default='mac')
     argparser.add_argument('--weight-sparsity', type=float, default=0.0)
     argparser.add_argument('--seed', type=int, default=5678)
+    argparser.add_argument('--hidden-size', type=int, action='append')
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
     argparser.add_argument('--prune', action='store_true')
@@ -396,8 +397,7 @@ if __name__ == '__main__':
 
     config_dict = dict(seed=args.seed,
                        cell_type=cell_type, 
-                       # hidden_size=[64, 64],
-                       hidden_size=128,
+                       hidden_size=args.hidden_size,
                        weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
                        prune=args.prune,
                        use_wandb=args.wandb,
