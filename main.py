@@ -59,15 +59,16 @@ def compute_loss_and_grads(model, x, y):
 #     return M, M
 
 @eqx.filter_jit
-def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
+def make_step_bptt(full_model, x, y, opt_state, tx, cell_type, prune):
     params, static = eqx.partition(full_model, eqx.is_inexact_array)
     trainable_params = haliax.state_dict.to_state_dict(params)
 
     (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
+    assert jnp.all(jnp.isfinite(loss)), f"Loss {loss} is not finite."
 
-    # updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_array))
+    # updates, opt_state = tx.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     grads = haliax.state_dict.to_state_dict(eqx.filter(grads, eqx.is_inexact_array))
-    updates, opt_state = optim.update(grads, opt_state, trainable_params)
+    updates, opt_state = tx.update(grads, opt_state, trainable_params)
     trainable_params = eqx.apply_updates(trainable_params, updates)
     # For jax pruner
     if prune:
@@ -88,7 +89,7 @@ def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
 
 
 @eqx.filter_jit
-def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
+def make_step_rtrl(full_model, x, y, opt_state, tx, cell_type, prune):
     params, static = eqx.partition(full_model, eqx.is_inexact_array)
     trainable_params = haliax.state_dict.to_state_dict(params)
 
@@ -173,8 +174,8 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     # jax.debug.print("Are the hh grads correct?: {a}", a=jnp.isclose(grads.cell.weight_hh, grads_.cell.weight_hh).all())
     # jax.debug.print("Are the lin grads correct?: {a}", a=jnp.isclose(grads.linear.weight, grads_.linear.weight).all())
 
-    # updates, opt_state = optim.update(grads, opt_state, eqx.filter(full_model, eqx.is_array))
-    updates, opt_state = optim.update(grads, opt_state, trainable_params)
+    # updates, opt_state = tx.update(grads, opt_state, eqx.filter(full_model, eqx.is_array))
+    updates, opt_state = tx.update(grads, opt_state, trainable_params)
     # ipdb.set_trace()
     trainable_params = eqx.apply_updates(trainable_params, updates)
     # ipdb.set_trace()
@@ -196,7 +197,7 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     # ## For now, assume only last timestep contributes to loss. TODO fix later.
     # (new_h, new_c, new_o, new_i, jacs) = outs
     # # (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo), (Ji, bar_Mi) = jacs
-    # updates, opt_state = optim.update(grads, opt_state)
+    # updates, opt_state = tx.update(grads, opt_state)
     # full_model = eqx.apply_updates(full_model, updates)
     # return loss, full_model, opt_state, outs
 
@@ -249,16 +250,21 @@ def train(
 
     full_model = model
 
+    clipper = optax.clip(1.0)
     optim = optax.adam(learning_rate)
+    tx = optax.chain(
+            clipper,
+            optim
+            )
     # For Jax pruner
     if prune:
-        optim = pruner.wrap_optax(optim)
+        tx = pruner.wrap_optax(tx)
     ## End Jax pruner
     # ipdb.set_trace()
 
     params = eqx.filter(full_model, eqx.is_inexact_array)
     trainable_params = haliax.state_dict.to_state_dict(params)
-    opt_state = optim.init(trainable_params)
+    opt_state = tx.init(trainable_params)
 
     validation_accs = []
     cum_mean_state_density, cum_mean_M_density = 0., 0.
@@ -268,7 +274,7 @@ def train(
         for step, batch in enumerate(tqdm(trn_loader)):
             x, y, integration_times = prep_batch(batch, SEQ_LENGTH, IN_DIM)
 
-            loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, optim, cell_type,
+            loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, tx, cell_type,
                                                                     prune)
 
             # print(outs)
