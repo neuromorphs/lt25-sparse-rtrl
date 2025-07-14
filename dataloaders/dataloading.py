@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import jax
+import jax.numpy as jnp
 import jax.random as jrandom
 from pathlib import Path
 import os
@@ -18,6 +19,59 @@ ReturnType = Tuple[DataLoader, DataLoader, DataLoader, Dict, int, int, int, int]
 # Custom loading functions must therefore have the template.
 dataset_fn = Callable[[str, Optional[int], Optional[int]], ReturnType]
 
+def prep_batch(batch: tuple,
+               seq_len: int,
+               in_dim: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.array]:
+    """
+    Take a batch and convert it to a standard x/y format.
+    :param batch:       (x, y, aux_data) as returned from dataloader.
+    :param seq_len:     (int) length of sequence.
+    :param in_dim:      (int) dimension of input.
+    :return:
+    """
+    if len(batch) == 2:
+        inputs, targets = batch
+        aux_data = {}
+    elif len(batch) == 3:
+        inputs, targets, aux_data = batch
+    else:
+        raise RuntimeError("Err... not sure what I should do... Unhandled data type. ")
+
+    # Convert to JAX.
+    inputs = jnp.asarray(inputs.numpy())
+
+    # Grab lengths from aux if it is there.
+    lengths = aux_data.get('lengths', None)
+
+    # Make all batches have same sequence length
+    num_pad = seq_len - inputs.shape[1]
+    if num_pad > 0:
+        # Assuming vocab padding value is zero
+        inputs = jnp.pad(inputs, ((0, 0), (0, num_pad)), 'constant', constant_values=(0,))
+
+    # Inputs is either [n_batch, seq_len] or [n_batch, seq_len, in_dim].
+    # If there are not three dimensions and trailing dimension is not equal to in_dim then
+    # transform into one-hot.  This should be a fairly reliable fix.
+    if (inputs.ndim < 3) and (inputs.shape[-1] != in_dim):
+        inputs = jax.nn.one_hot(jnp.asarray(inputs), in_dim)
+
+    # If there are lengths, bundle them up.
+    if lengths is not None:
+        lengths = jnp.asarray(lengths.numpy())
+        full_inputs = (inputs.astype(float), lengths.astype(float))
+    else:
+        full_inputs = inputs.astype(float)
+
+    # Convert and apply.
+    targets = jnp.array(targets.numpy())
+
+    # If there is an aux channel containing the integration times, then add that.
+    if 'timesteps' in aux_data.keys():
+        integration_timesteps = jnp.diff(np.asarray(aux_data['timesteps'].numpy()))
+    else:
+        integration_timesteps = jnp.ones((len(inputs), seq_len))
+
+    return full_inputs, targets.astype(float), integration_timesteps
 
 # Example interface for making a loader.
 def custom_loader(cache_dir: str,
@@ -339,7 +393,7 @@ def create_mnist_classification_dataset(cache_dir: Union[str, Path] = DEFAULT_CA
 	"""
 
 	print("[*] Generating MNIST Classification Dataset")
-	from s5.dataloaders.basic import MNIST
+	from dataloaders.basic import MNIST
 	name = 'mnist'
 
 	kwargs = {

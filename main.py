@@ -1,96 +1,40 @@
-import os
-from datetime import datetime
-import random
-import pickle
 from functools import partial
 import argparse
 
-from tqdm import tqdm
-import ipdb
-from ipdb import launch_ipdb_on_exception
-import numpy as np
-import yaml
+import argparse
+from functools import partial
+from typing import Tuple
+
 import equinox as eqx
+import haliax
 import jax
-import jax.lax as lax
 import jax.numpy as jnp
 import jax.random as jrandom
-import optax
-import haliax
-
 import jaxpruner
 import ml_collections
+import numpy as np
+import optax
+from ipdb import launch_ipdb_on_exception
+from tqdm import tqdm
 
 import wandb
-
-from dataloaders.dataloading import create_speechcommands35_classification_dataset, create_toy_classification_dataset
+from dataloaders.dataloading import create_speechcommands35_classification_dataset, create_toy_classification_dataset, \
+    create_mnist_classification_dataset, prep_batch
 # from data import get_data, dataloader
 from models import RNN, CellType
 
-from typing import Any, Tuple
 
-def prep_batch(batch: tuple,
-               seq_len: int,
-               in_dim: int) -> Tuple[np.ndarray, np.ndarray, np.array]:
-    """
-    Take a batch and convert it to a standard x/y format.
-    :param batch:       (x, y, aux_data) as returned from dataloader.
-    :param seq_len:     (int) length of sequence.
-    :param in_dim:      (int) dimension of input.
-    :return:
-    """
-    if len(batch) == 2:
-        inputs, targets = batch
-        aux_data = {}
-    elif len(batch) == 3:
-        inputs, targets, aux_data = batch
-    else:
-        raise RuntimeError("Err... not sure what I should do... Unhandled data type. ")
 
-    # Convert to JAX.
-    inputs = np.asarray(inputs.numpy())
-
-    # Grab lengths from aux if it is there.
-    lengths = aux_data.get('lengths', None)
-
-    # Make all batches have same sequence length
-    num_pad = seq_len - inputs.shape[1]
-    if num_pad > 0:
-        # Assuming vocab padding value is zero
-        inputs = np.pad(inputs, ((0, 0), (0, num_pad)), 'constant', constant_values=(0,))
-
-    # Inputs is either [n_batch, seq_len] or [n_batch, seq_len, in_dim].
-    # If there are not three dimensions and trailing dimension is not equal to in_dim then
-    # transform into one-hot.  This should be a fairly reliable fix.
-    if (inputs.ndim < 3) and (inputs.shape[-1] != in_dim):
-        inputs = one_hot(np.asarray(inputs), in_dim)
-
-    # If there are lengths, bundle them up.
-    if lengths is not None:
-        lengths = np.asarray(lengths.numpy())
-        full_inputs = (inputs.astype(float), lengths.astype(float))
-    else:
-        full_inputs = inputs.astype(float)
-
-    # Convert and apply.
-    targets = np.array(targets.numpy())
-
-    # If there is an aux channel containing the integration times, then add that.
-    if 'timesteps' in aux_data.keys():
-        integration_timesteps = np.diff(np.asarray(aux_data['timesteps'].numpy()))
-    else:
-        integration_timesteps = np.ones((len(inputs), seq_len))
-
-    return full_inputs, targets.astype(float), integration_timesteps
 
 @eqx.filter_jit
 def loss_fn(y, pred_y):
     one_hot_label = jax.nn.one_hot(y, num_classes=pred_y.shape[-1])
-    l =  -np.sum(one_hot_label * jnp.log(pred_y), axis=-1)
+    l = -np.sum(one_hot_label * jnp.log(pred_y), axis=-1)
     l = jnp.mean(l)
     # # Trains with respect to binary cross-entropy
     # l = -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y))
     return l, l
+
 
 @eqx.filter_jit
 def compute_loss_and_outputs(model, x, y):
@@ -101,9 +45,11 @@ def compute_loss_and_outputs(model, x, y):
     # jax.debug.print("{loss}", loss=loss)
     return loss, outs
 
+
 @eqx.filter_value_and_grad(has_aux=True)
 def compute_loss_and_grads(model, x, y):
     return compute_loss_and_outputs(model, x, y)
+
 
 # @eqx.filter_jit
 # def compute_influence_matrix(carry, inp):
@@ -140,11 +86,12 @@ def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
 
     return loss, full_model, opt_state, outs, (time_state_sparsity, time_state_sparsity)
 
+
 @eqx.filter_jit
 def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
-
     params, static = eqx.partition(full_model, eqx.is_inexact_array)
     trainable_params = haliax.state_dict.to_state_dict(params)
+
     # lmm = lambda mm: mm(x), mm(x)
 
     ## full_model: x -> pred_y, outs
@@ -187,7 +134,6 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     # jax.debug.print("Percent zeros in states: {m}", m=jnp.mean(outs[0] == 0.))
     # jax.debug.print("Percent zeros in Ms: {m}", m=jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.)))
 
-
     if cell_type in [CellType.EqxGRU]:
         final_state = outs[:, -1]
         time_state_sparsity = jnp.mean(outs == 0., axis=2)
@@ -221,7 +167,7 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     # wcg = eqx.tree_at(lambda m: m.cell, trainable_params, replace=cell_grads)
     # grads = eqx.tree_at(lambda m: m.linear, wcg, replace=lin_grads)
     grads = haliax.state_dict.to_state_dict(eqx.filter(cell_grads, eqx.is_inexact_array), prefix="cell") | \
-        haliax.state_dict.to_state_dict(eqx.filter(lin_grads, eqx.is_inexact_array), prefix="linear")
+            haliax.state_dict.to_state_dict(eqx.filter(lin_grads, eqx.is_inexact_array), prefix="linear")
 
     # (loss, outs), grads_ = compute_loss_and_grads(full_model, x, y)
     # jax.debug.print("Are the hh grads correct?: {a}", a=jnp.isclose(grads.cell.weight_hh, grads_.cell.weight_hh).all())
@@ -254,6 +200,7 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     # full_model = eqx.apply_updates(full_model, updates)
     # return loss, full_model, opt_state, outs
 
+
 def train(
         make_step,
         batch_size=50,
@@ -268,8 +215,8 @@ def train(
         pruner=None,
         use_wandb=False,
         dataset='speech',
-        dataset_size = 10000,
-        seq_len = 17,
+        dataset_size=10000,
+        seq_len=17,
 ):
     print(f"Seed: {seed}")
     if use_wandb:
@@ -281,10 +228,13 @@ def train(
     if dataset == 'speech':
         cache_dir = './raw_datasets/speech_commands/0.0.3/SpeechCommands/processed_data'
         trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE = \
-                create_speechcommands35_classification_dataset(cache_dir, bsz = batch_size, seed = seed)
+            create_speechcommands35_classification_dataset(cache_dir, bsz=batch_size, seed=seed)
+    elif dataset == 'smnist':
+        trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE = \
+            create_mnist_classification_dataset(cache_dir=None, bsz=batch_size, seed=seed)
     elif dataset == 'toy':
         trn_loader, val_loader, tst_loader, aux_loaders, N_CLASSES, SEQ_LENGTH, IN_DIM, TRAIN_SIZE = \
-            create_toy_classification_dataset(dataset_size, seq_len, bsz = batch_size, seed = seed)
+            create_toy_classification_dataset(dataset_size, seq_len, bsz=batch_size, seed=seed)
 
     _, model_key = jrandom.split(jrandom.PRNGKey(seed), 2)
 
@@ -317,7 +267,8 @@ def train(
         for step, batch in enumerate(tqdm(trn_loader)):
             x, y, integration_times = prep_batch(batch, SEQ_LENGTH, IN_DIM)
 
-            loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, optim, cell_type, prune)
+            loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, optim, cell_type,
+                                                                    prune)
 
             # print(outs)
             loss = loss.item()
@@ -326,13 +277,13 @@ def train(
                 mean_M_sparsity = jnp.mean(sparsity[1])
                 cum_mean_state_density += (1 - mean_state_sparsity)
                 cum_mean_M_density += (1 - mean_M_sparsity)
-                data = dict(epoch=epoch, step=step, loss=loss, 
-                        # state_sparsity=sparsity[0], M_sparsity=sparsity[1],
-                        mean_state_sparsity=mean_state_sparsity,
-                        mean_M_sparsity=mean_M_sparsity,
-                        cum_mean_state_density=cum_mean_state_density,
-                        cum_mean_M_density=cum_mean_M_density,
-                        mean_sq_M_sparsity=jnp.mean(sparsity[1] ** 2))
+                data = dict(epoch=epoch, step=step, loss=loss,
+                            # state_sparsity=sparsity[0], M_sparsity=sparsity[1],
+                            mean_state_sparsity=mean_state_sparsity,
+                            mean_M_sparsity=mean_M_sparsity,
+                            cum_mean_state_density=cum_mean_state_density,
+                            cum_mean_M_density=cum_mean_M_density,
+                            mean_sq_M_sparsity=jnp.mean(sparsity[1] ** 2))
                 wandb.log(dict(train=data))
 
             if step % 100 == 0:
@@ -385,7 +336,7 @@ if __name__ == '__main__':
     argparser.add_argument('--prune', action='store_true')
     argparser.add_argument('--debug', action='store_true')
     argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='bptt')
-    argparser.add_argument('--dataset', type=str, choices=['toy', 'speech'], default='toy')
+    argparser.add_argument('--dataset', type=str, choices=['toy', 'speech', 'smnist'], default='toy')
     argparser.add_argument('--model', type=str, choices=['gru', 'egru'], default='egru')
 
     args = argparser.parse_args()
@@ -395,10 +346,10 @@ if __name__ == '__main__':
     elif args.model == 'egru':
         cell_type = CellType.EGRU
     else:
-        raise RuntimeError(f"Unknown model {cell_type}")
+        raise RuntimeError(f"Unknown model {args.model}")
 
     config_dict = dict(seed=args.seed,
-                       cell_type=cell_type, 
+                       cell_type=cell_type,
                        hidden_size=args.hidden_size, batch_size=args.batch_size,
                        weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
                        prune=args.prune,
