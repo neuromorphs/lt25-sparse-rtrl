@@ -396,8 +396,8 @@ if __name__ == '__main__':
                 sparsity_config_dict = dict(
                     algorithm='magnitude',
                     update_freq=10,
-                    update_end_step=1000,
-                    update_start_step=200,
+                    update_start_step = 10,  # 200 steps per epoch for smnist
+                    update_end_step = 200 * args.epochs,
                     sparsity=0.95,
                     dist_type='erk',
                 )
@@ -405,8 +405,8 @@ if __name__ == '__main__':
                 sparsity_config_dict = dict(
                     algorithm = 'magnitude_ste',
                     sparsity = 0.95,
-                    update_end_step = 0,
-                    update_start_step = 0,
+                    update_start_step = 10,  # 200 steps per epoch for smnist
+                    update_end_step = 200 * args.epochs,
                     dist_type = 'erk'
                 )
             case 'set':
