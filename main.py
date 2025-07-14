@@ -8,6 +8,7 @@ from typing import Tuple
 import equinox as eqx
 import haliax
 import jax
+from jax.experimental import checkify
 import jax.numpy as jnp
 import jax.random as jrandom
 import jaxpruner
@@ -64,7 +65,8 @@ def make_step_bptt(full_model, x, y, opt_state, tx, cell_type, prune):
     trainable_params = haliax.state_dict.to_state_dict(params)
 
     (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
-    assert jnp.all(jnp.isfinite(loss)), f"Loss {loss} is not finite."
+    checkify.check(jnp.all(jnp.isfinite(loss)), f"Loss {loss} is not finite.")
+    # assert jnp.all(jnp.isfinite(loss)), f"Loss {loss} is not finite."
 
     # updates, opt_state = tx.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     grads = haliax.state_dict.to_state_dict(eqx.filter(grads, eqx.is_inexact_array))
@@ -274,9 +276,11 @@ def train(
         for step, batch in enumerate(tqdm(trn_loader)):
             x, y, integration_times = prep_batch(batch, SEQ_LENGTH, IN_DIM)
 
-            loss, full_model, opt_state, outs, sparsity = make_step(full_model, x, y, opt_state, tx, cell_type,
-                                                                    prune)
+            err, (loss, full_model, opt_state, outs, sparsity) = checkify.checkify(make_step)(full_model, x, y, 
+                                                                                            opt_state, tx, cell_type,
+                                                                                            prune)
 
+            err.throw()
             # print(outs)
             loss = loss.item()
             if use_wandb:
