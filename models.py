@@ -92,8 +92,10 @@ class EGRUCell(Module):
     weight_ih: Array
     weight_hh: Array
     threshold: Array
-    bias: Optional[Array]
-    mask_hh: Array = eqx.field(static=True)
+    bias: Array
+    recurrent_bias: Array
+
+    # mask_hh: Array = eqx.field(static=True)
     input_size: int = eqx.field(static=True)
     hidden_size: int = eqx.field(static=True)
     alpha: float = eqx.field(static=True)
@@ -112,17 +114,18 @@ class EGRUCell(Module):
             **kwargs
     ):
         super().__init__(**kwargs)
+
         self.alpha = 0.001
 
         ihkey, hhkey, bkey, thkey = jrandom.split(key, 4)
-        lim = math.sqrt(1 / hidden_size)
+        # lim = math.sqrt(1 / hidden_size)
 
-        xavier_uniform_initializer = jax.nn.initializers.glorot_normal()
+        xavier_initializer = jax.nn.initializers.glorot_normal()
 
         # self.weight_ih = jrandom.uniform(
         #     ihkey, (3 * hidden_size, input_size), minval=-lim, maxval=lim
         # )
-        self.weight_ih = xavier_uniform_initializer(
+        self.weight_ih = xavier_initializer(
             ihkey, (3 * hidden_size, input_size), jnp.float32
         )
 
@@ -130,20 +133,30 @@ class EGRUCell(Module):
         # self.weight_hh = jrandom.uniform(
         #     hhwkey, (3 * hidden_size, hidden_size), minval=-lim, maxval=lim
         # )
-        self.weight_hh = xavier_uniform_initializer(
+        self.weight_hh = xavier_initializer(
             hhwkey, (3 * hidden_size, hidden_size), jnp.float32
         )
-        s = weight_sparsity
-        self.mask_hh = jrandom.choice(
-            hhmkey, jnp.array([True, False]), (3 * hidden_size, hidden_size), p=jnp.array([1 - s, s])
-        )
 
-        self.bias = jrandom.uniform(
-            bkey, (3 * hidden_size,), minval=-lim, maxval=lim
-        )
+        # s = weight_sparsity
+        # self.mask_hh = jrandom.choice(
+        #     hhmkey, jnp.array([True, False]), (3 * hidden_size, hidden_size), p=jnp.array([1 - s, s])
+        # )
 
-        self.threshold = jrandom.normal(
-            thkey, (hidden_size,)
+        # self.bias = jrandom.uniform(
+        #     bkey, (3 * hidden_size,), minval=-lim, maxval=lim
+        # )
+        self.bias = jnp.zeros( (3 * hidden_size,))
+        self.recurrent_bias = jnp.zeros( (3 * hidden_size,))
+        # self.bias = jrandom.uniform(
+        #     bkey, (3 * hidden_size,), minval=-lim, maxval=lim
+        # )
+
+
+        beta = 3
+        thr_mean = 0.3
+        alpha = beta * thr_mean / (1 - thr_mean)
+        self.threshold = jrandom.beta(
+            thkey, alpha, beta, (hidden_size,)
         ) - 1.
 
         self.input_size = input_size
@@ -153,43 +166,48 @@ class EGRUCell(Module):
         if activity_sparse:
             self.output_fn = event_fn
         else:
-            self.output_fn = lambda x: jnp.ones_like(x)
+            self.output_fn = lambda x: x
 
     def __call__(
-            self, input: Array, state: Tuple[Array, Array, Array], *, key: Optional["jax.random.PRNGKey"] = None
+            self, input_: Array, state: Tuple[Array, Array, Array], *, key: Optional["jax.random.PRNGKey"] = None
     ):
-        thr = jnn.sigmoid(self.threshold)
+        # thr = jnn.sigmoid(self.threshold)
+        thr = jax.lax.clamp(0., self.threshold, 1.)
         h, c, o, i = state
-        hidden = o * c
+        hidden = h # o * c
         c_reset = c - (o * thr)
 
         iu, ir, ic = jnp.split(i, 3, -1)
 
-        def fn(hh, model):
-            lin_x = model.weight_ih @ input
+        lin_x = self.weight_ih @ input_ + self.bias
+        xu, xr, xc = jnp.split(lin_x, 3, -1)
 
+        w_hh = self.weight_hh
+
+        # Sould pass in o & c here for RTRL to get the right gradients (I think)
+        def fn(hidden, model):
             # w_hh = model.weight_hh[model.mask_hh]
-            w_hh = jnp.where(model.mask_hh, model.weight_hh, jnp.zeros_like(model.weight_hh))
+            # w_hh = jnp.where(model.mask_hh, model.weight_hh, jnp.zeros_like(model.weight_hh))
             # jax.debug.print("Percent zeros in w_hh: {m}", m=jnp.mean(jnp.isclose(w_hh, 0)))
             # w_hh = model.weight_hh
-            lin_h = w_hh @ hh
+            lin_h = w_hh @ hidden  + model.recurrent_bias
 
-            xu, xr, xc = jnp.split(lin_x, 3, -1)
             hu, hr, hc = jnp.split(lin_h, 3, -1)
-            bu, br, bc = jnp.split(model.bias, 3)
+            # bu, br, bc = jnp.split(model.bias, 3)
 
-            new_iu = model.alpha * iu + (1 - model.alpha) * (xu + hu + bu)
-            new_u = jnn.sigmoid(new_iu)
-            new_ir = model.alpha * ir + (1 - model.alpha) * (xr + hr + br)
+            new_ir = model.alpha * ir + (1 - model.alpha) * (xr + hr) #  + br)
             new_r = jnn.sigmoid(new_ir)
-            new_ic = model.alpha * ic + (1 - model.alpha) * (xc + new_r * hc + bc)
+
+            new_ic = model.alpha * ic + (1 - model.alpha) * (xc + new_r * hc) #  + bc)
             new_z = jnn.tanh(new_ic)
 
-            new_i = jnp.concatenate([new_iu, new_ir, new_ic], -1)
-            new_c = (1 - new_u) * c_reset + new_u * new_z
+            new_iu = model.alpha * iu + (1 - model.alpha) * (xu + hu) #  + bu)
+            new_u = jnn.sigmoid(new_iu)
+            new_c = new_u * c_reset + (1- new_u) * new_z
 
             new_o = self.output_fn(new_c - thr)
             new_h = new_o * new_c
+            new_i = jnp.concatenate([new_iu, new_ir, new_ic], -1)
             # new_h = new_o
 
             return (new_h, new_c, new_o, new_i), (new_h, new_c, new_o, new_i)
@@ -250,7 +268,7 @@ class RNN(eqx.Module):
         self.in_size = in_size
 
         if isinstance(hidden_size, int):
-            print(f"Initialising cell with input {in_size} and hidden size {hidden_size}")
+            # print(f"Initialising cell with input {in_size} and hidden size {hidden_size}")
             hidden_size = [hidden_size]
 
         self.cells = []

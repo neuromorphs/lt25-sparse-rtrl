@@ -85,7 +85,7 @@ def prep_batch(batch: tuple,
 
 @eqx.filter_jit
 def loss_fn(y, pred_y):
-    one_hot_label = jax.nn.one_hot(y, num_classes=pred_y.shape[1])
+    one_hot_label = jax.nn.one_hot(y, num_classes=pred_y.shape[-1])
     l =  -np.sum(one_hot_label * jnp.log(pred_y))
     # # Trains with respect to binary cross-entropy
     # l = -jnp.mean(y * jnp.log(pred_y) + (1 - y) * jnp.log(1 - pred_y))
@@ -104,12 +104,12 @@ def compute_loss_and_outputs(model, x, y):
 def compute_loss_and_grads(model, x, y):
     return compute_loss_and_outputs(model, x, y)
 
-@eqx.filter_jit
-def compute_influence_matrix(carry, inp):
-    M_prev = carry
-    J, bar_M = inp
-    M = jnp.einsum('bkl,blij->bkij', J, M_prev) + bar_M
-    return M, M
+# @eqx.filter_jit
+# def compute_influence_matrix(carry, inp):
+#     M_prev = carry
+#     J, bar_M = inp
+#     M = jnp.einsum('bkl,blij->bkij', J, M_prev) + bar_M
+#     return M, M
 
 @eqx.filter_jit
 def make_step_bptt(full_model, x, y, opt_state, optim, cell_type, prune):
@@ -149,15 +149,19 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     ## For EGRU, outs = (h, c, o, i, (Jh, barMh), (Jc, barMc), (Jo, barMo), (Ji, barMi))
     ## For eqx.GRU, outs = (h)
     # @eqx.filter_grad
-    @eqx.filter_jit
-    def fma(params, static, xx):
-        mm = eqx.combine(params, static)
-        pred_y, outs = mm(xx)
-        return (pred_y, outs), (pred_y, outs)
 
     # @eqx.filter_grad
     @eqx.filter_jit
     def jj(mm, xx):
+
+        def fma(params, static, xx):
+            """
+            Need a function where the first argument is the trainable parameters for jaxfwd
+            """
+            mm = eqx.combine(params, static)
+            pred_y, outs = mm(xx)
+            return (pred_y, outs), (pred_y, outs)
+
         params, static = eqx.partition(mm, eqx.is_array)
         return jax.jacfwd(fma, has_aux=True)(params, static, xx)
 
@@ -165,7 +169,7 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     def ls(mm, hht, y):
         # lg, pred_y = jax.jacfwd(lin, has_aux=True)(lambda x: jax.nn.sigmoid(mm.linear(x)), hht)
         def _loss(lin):
-            pred_y = jax.nn.sigmoid(lin(hht))
+            pred_y = jax.nn.softmax(lin(hht))
             l, _ = loss_fn(y, pred_y)
             return l, l
 
@@ -189,7 +193,8 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
     else:
         final_state = outs[0][:, -1]
         time_state_sparsity = jnp.mean(outs[0] == 0., axis=2)
-        time_J_sparsity = jnp.mean(jnp.isclose(Jouts[0].cell.weight_hh, 0.), axis=(2, 3, 4))
+        time_J_sparsity = jnp.mean(jnp.isclose(Jouts[0].cells[0].weight_hh, 0.), axis=(2, 3, 4))
+
     Jloss, (loss, lg) = jax.vmap(partial(jax.jacfwd(ls, has_aux=True, argnums=1), full_model))(final_state, y)
 
     def calc_grad(M):
@@ -198,9 +203,9 @@ def make_step_rtrl(full_model, x, y, opt_state, optim, cell_type, prune):
         return jnp.mean(bhgrads, axis=(0,))
 
     if cell_type in [CellType.EqxGRU]:
-        cell_grads = jax.tree_util.tree_map(calc_grad, Jouts.cell)
+        cell_grads = jax.tree_util.tree_map(calc_grad, Jouts.cells)
     else:
-        cell_grads = jax.tree_util.tree_map(calc_grad, Jouts[0].cell)
+        cell_grads = jax.tree_util.tree_map(calc_grad, Jouts[0].cells)
     lin_grads = jax.tree_util.tree_map(partial(jnp.mean, axis=(0,)), lg)
 
     ## Test if grads are correct (Yes they are!!)
@@ -314,20 +319,21 @@ def train(
 
             # print(outs)
             loss = loss.item()
-            mean_state_sparsity = jnp.mean(sparsity[0])
-            mean_M_sparsity = jnp.mean(sparsity[1])
-            cum_mean_state_density += (1 - mean_state_sparsity)
-            cum_mean_M_density += (1 - mean_M_sparsity)
-            data = dict(epoch=epoch, step=step, loss=loss, state_sparsity=sparsity[0], M_sparsity=sparsity[1],
+            if use_wandb:
+                mean_state_sparsity = jnp.mean(sparsity[0])
+                mean_M_sparsity = jnp.mean(sparsity[1])
+                cum_mean_state_density += (1 - mean_state_sparsity)
+                cum_mean_M_density += (1 - mean_M_sparsity)
+                data = dict(epoch=epoch, step=step, loss=loss, 
+                        # state_sparsity=sparsity[0], M_sparsity=sparsity[1],
                         mean_state_sparsity=mean_state_sparsity,
                         mean_M_sparsity=mean_M_sparsity,
                         cum_mean_state_density=cum_mean_state_density,
                         cum_mean_M_density=cum_mean_M_density,
                         mean_sq_M_sparsity=jnp.mean(sparsity[1] ** 2))
-            if use_wandb:
                 wandb.log(dict(train=data))
 
-            if step % 10 == 0:
+            if step % 100 == 0:
                 print(f"epoch={epoch}, step={step}, loss={loss}")
 
         va = []
@@ -373,6 +379,7 @@ if __name__ == '__main__':
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
     argparser.add_argument('--prune', action='store_true')
+    argparser.add_argument('--debug', action='store_true')
     argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='bptt')
     argparser.add_argument('--dataset', type=str, choices=['toy', 'speech'], default='toy')
     argparser.add_argument('--model', type=str, choices=['gru', 'egru'], default='egru')
@@ -387,7 +394,9 @@ if __name__ == '__main__':
         raise RuntimeError(f"Unknown model {cell_type}")
 
     config_dict = dict(seed=args.seed,
-                       cell_type=cell_type, hidden_size=[64, 64],
+                       cell_type=cell_type, 
+                       # hidden_size=[64, 64],
+                       hidden_size=128,
                        weight_sparsity=args.weight_sparsity, disable_activity_sparsity=args.disable_activity_sparsity,
                        prune=args.prune,
                        use_wandb=args.wandb,
@@ -410,7 +419,15 @@ if __name__ == '__main__':
         # pruner = jaxpruner.MagnitudePruning(sparsity_distribution_fn=sparsity_distribution)
         pruner = jaxpruner.create_updater_from_config(sparsity_config)
 
-    with launch_ipdb_on_exception():
+    if args.debug:
+        with launch_ipdb_on_exception():
+            if args.method == 'rtrl':
+                train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
+            elif args.method == 'bptt':
+                train(make_step=make_step_bptt, pruner=pruner, **config_dict)
+            else:
+                raise RuntimeError(f"Unknown method {args.method}")
+    else:
         if args.method == 'rtrl':
             train(make_step=make_step_rtrl, pruner=pruner, **config_dict)  # All right, let's run the code.
         elif args.method == 'bptt':
