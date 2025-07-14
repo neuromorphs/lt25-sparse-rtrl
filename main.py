@@ -271,8 +271,7 @@ def train(
     validation_accs = []
     cum_mean_state_density, cum_mean_M_density = 0., 0.
     # for step, (x, y) in zip(range(steps), trn_loader):
-    n_epochs = 10
-    for epoch in range(n_epochs):
+    for epoch in range(epochs):
         for step, batch in enumerate(tqdm(trn_loader)):
             x, y, integration_times = prep_batch(batch, SEQ_LENGTH, IN_DIM)
 
