@@ -1,7 +1,6 @@
-import ipdb
 import math
 from enum import Enum
-from typing import Optional, Tuple, Callable
+from typing import Optional, Callable
 
 import equinox as eqx
 import jax
@@ -9,11 +8,9 @@ import jax.lax as lax
 import jax.nn as jnn
 import jax.numpy as jnp
 import jax.random as jrandom
-from equinox import Module, static_field
+from equinox import Module
 from jax import custom_jvp
 from jaxtyping import Array
-
-
 
 
 @custom_jvp
@@ -84,7 +81,6 @@ class RNNCell(Module):
         else:
             J, bar_M = None, None
 
-        # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
         return new, (new, bar_M, J)
 
     def init_carry(self):
@@ -151,12 +147,11 @@ class EGRUCell(Module):
         # self.bias = jrandom.uniform(
         #     bkey, (3 * hidden_size,), minval=-lim, maxval=lim
         # )
-        self.bias = jnp.zeros( (3 * hidden_size,))
-        self.recurrent_bias = jnp.zeros( (3 * hidden_size,))
+        self.bias = jnp.zeros((3 * hidden_size,))
+        self.recurrent_bias = jnp.zeros((3 * hidden_size,))
         # self.bias = jrandom.uniform(
         #     bkey, (3 * hidden_size,), minval=-lim, maxval=lim
         # )
-
 
         beta = 3
         thr_mean = 0.3
@@ -196,9 +191,8 @@ class EGRUCell(Module):
 
             # w_hh = model.weight_hh[model.mask_hh]
             # w_hh = jnp.where(model.mask_hh, model.weight_hh, jnp.zeros_like(model.weight_hh))
-            # jax.debug.print("Percent zeros in w_hh: {m}", m=jnp.mean(jnp.isclose(w_hh, 0)))
             # w_hh = model.weight_hh
-            lin_h = w_hh @ h  + model.recurrent_bias
+            lin_h = w_hh @ h + model.recurrent_bias
 
             hu, hr, hc = jnp.split(lin_h, 3, -1)
             # bu, br, bc = jnp.split(model.bias, 3)
@@ -211,7 +205,7 @@ class EGRUCell(Module):
 
             # new_iu = model.alpha * iu + (1 - model.alpha) * (xu + hu) #  + bu)
             new_u = jnn.sigmoid(xu + hu)
-            new_c = new_u * c_reset + (1- new_u) * new_z
+            new_c = new_u * c_reset + (1 - new_u) * new_z
 
             # return (new_h, new_c, new_o), (new_h, new_c, new_o)
             return new_c, new_c
@@ -221,7 +215,7 @@ class EGRUCell(Module):
 
         if self.output_jac:
             jac = jax.jacfwd(fn, argnums=(0, 1), has_aux=True)
-        else: 
+        else:
             jac = fn
 
         res, new_c = jac(state, self)
@@ -231,10 +225,6 @@ class EGRUCell(Module):
 
         Jc, bar_Mc = res
 
-        # import ipdb
-        # ipdb.set_trace()
-
-        # print(self.weight_hh.shape, hidden.shape, j1.shape, j2.shape)
         # return (new_h, new_c, new_o), (new_h, new_c, new_o, (Jh, bar_Mh), (Jc, bar_Mc), (Jo, bar_Mo))
         return new_c, (new_c, (Jc, bar_Mc))
 
@@ -272,7 +262,6 @@ class CellType(Enum):
 
 
 class RNN(eqx.Module):
-    # cells: list[eqx.Module]
     multilayer_cell: MultiLayerCell
 
     ## NOTE: Want to keep linear layer here so that the RNN class is always compatible with eqx.* RNNs
@@ -281,17 +270,15 @@ class RNN(eqx.Module):
     hidden_size: int = eqx.field(static=True)
     in_size: int = eqx.field(static=True)
 
-    # init_fn: Callable
-    # apply_fn: Callable
 
-    def __init__(self, 
-                cell_type, 
-                 in_size: int, 
-                 out_size: int, 
+    def __init__(self,
+                 cell_type,
+                 in_size: int,
+                 out_size: int,
                  hidden_size: int | list[int],
-                *, 
-                key: Optional["jax.random.PRNGKey"],
-                **kwargs
+                 *,
+                 key: Optional["jax.random.PRNGKey"],
+                 **kwargs
                  ):
         ckey, lkey = jrandom.split(key)
         self.in_size = in_size
@@ -324,46 +311,24 @@ class RNN(eqx.Module):
         final_state, outs = None, None
 
         hiddens = []
-        # inputs = []
         for i, hsz in enumerate(self.hidden_size):
             if isinstance(self.multilayer_cell.cells[i], eqx.nn.GRUCell):
                 hidden = jnp.zeros((hsz,))
             else:
                 hidden = self.multilayer_cell.cells[i].init_carry()
             hiddens.append(hidden)
-            # if i == 0:
-            #     inputs.append(input_)
-            # else:
-            #     inputs.append(None)
 
         def f(carry, inp):
             cs, os = self.multilayer_cell(inp, carry)
             return cs, os
-        
-        final_cs, outs = lax.scan(f, hiddens, input_)
 
-        # for cell in self.cells:
-        #
-        #     os_ = None
-        #     # if isinstance(cell, RNNCell):
-        #     #     final_state, outs = lax.scan(f, hidden, input_)
-        #     #     os_, _ = outs
-        #     if isinstance(cell, eqx.nn.GRUCell):
-        #         final_state, outs = lax.scan(f, hidden, input_)
-        #         os_ = outs
-        #     elif isinstance(cell, EGRUCell):
-        #         c, outs = lax.scan(f, hidden, input_)
-        #         # o, h, _ = cell.c_to_oh(c)
-        #         # final_state = h
-        #         cs_, _ = outs
-        #         os_, hs_, _ = cell.c_to_oh(cs_)
-        #     input_ = os_
+        final_cs, outs = lax.scan(f, hiddens, input_)
 
         last_cell = self.multilayer_cell.cells[-1]
         if isinstance(last_cell, EGRUCell):
             alpha = 0.9
-            tr_, _ = lax.scan(lambda carry, inp: (alpha * carry + (1 - alpha) * inp, None), jnp.zeros((last_cell.hidden_size)), outs[-1])
+            tr_, _ = lax.scan(lambda carry, inp: (alpha * carry + (1 - alpha) * inp, None),
+                              jnp.zeros((last_cell.hidden_size)), outs[-1])
             final_state = tr_
         pred = jax.nn.softmax(self.linear(final_state))
         return pred, outs
-

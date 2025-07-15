@@ -1,14 +1,9 @@
-from functools import partial
-import argparse
-
 import argparse
 from functools import partial
-from typing import Tuple
 
 import equinox as eqx
 import haliax
 import jax
-from jax.experimental import checkify
 import jax.numpy as jnp
 import jax.random as jrandom
 import jaxpruner
@@ -16,6 +11,7 @@ import ml_collections
 import numpy as np
 import optax
 from ipdb import launch_ipdb_on_exception
+from jax.experimental import checkify
 from tqdm import tqdm
 
 import wandb
@@ -23,8 +19,6 @@ from dataloaders.dataloading import create_speechcommands35_classification_datas
     create_mnist_classification_dataset, prep_batch
 # from data import get_data, dataloader
 from models import RNN, CellType
-
-
 
 
 @eqx.filter_jit
@@ -40,10 +34,8 @@ def loss_fn(y, pred_y):
 @eqx.filter_jit
 def compute_loss_and_outputs(model, x, y):
     pred_y, outs = jax.vmap(model)(x)
-    # jax.debug.print("{pred_y}", pred_y=pred_y)
     ## Trains with respect to binary cross-entropy
     loss, _ = loss_fn(y, pred_y)
-    # jax.debug.print("{loss}", loss=loss)
     return loss, outs
 
 
@@ -66,7 +58,6 @@ def make_step_bptt(full_model, x, y, opt_state, tx, cell_type, prune):
 
     (loss, outs), grads = compute_loss_and_grads(full_model, x, y)
     checkify.check(jnp.all(jnp.isfinite(loss)), f"Loss {loss} is not finite.")
-    # assert jnp.all(jnp.isfinite(loss)), f"Loss {loss} is not finite."
 
     # updates, opt_state = tx.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     grads = haliax.state_dict.to_state_dict(eqx.filter(grads, eqx.is_inexact_array))
@@ -85,7 +76,6 @@ def make_step_bptt(full_model, x, y, opt_state, tx, cell_type, prune):
     elif cell_type in [CellType.EGRU]:
         os, _, _ = full_model.multilayer_cell.cells[0].c_to_oh(outs[0])
         time_state_sparsity = jnp.mean(os == 0., axis=2)
-    # loss, full_model, opt_state, outs, sparsity
 
     return loss, full_model, opt_state, outs, (time_state_sparsity, time_state_sparsity)
 
@@ -219,8 +209,8 @@ def train(
         pruner=None,
         use_wandb=False,
         dataset='toy',
-        dataset_size = 10000,
-        seq_len = 17,
+        dataset_size=10000,
+        seq_len=17,
 ):
     print(f"Seed: {seed}")
     if use_wandb:
@@ -264,7 +254,6 @@ def train(
     if prune:
         tx = pruner.wrap_optax(tx)
     ## End Jax pruner
-    # ipdb.set_trace()
 
     params = eqx.filter(full_model, eqx.is_inexact_array)
     trainable_params = haliax.state_dict.to_state_dict(params)
@@ -277,12 +266,11 @@ def train(
         for step, batch in enumerate(tqdm(trn_loader)):
             x, y, integration_times = prep_batch(batch, SEQ_LENGTH, IN_DIM)
 
-            err, (loss, full_model, opt_state, outs, sparsity) = checkify.checkify(make_step)(full_model, x, y, 
-                                                                                            opt_state, tx, cell_type,
-                                                                                            prune)
+            err, (loss, full_model, opt_state, outs, sparsity) = checkify.checkify(make_step)(full_model, x, y,
+                                                                                              opt_state, tx, cell_type,
+                                                                                              prune)
 
             err.throw()
-            # print(outs)
             loss = loss.item()
             if use_wandb:
                 mean_state_sparsity = jnp.mean(sparsity[0])
@@ -323,10 +311,10 @@ def train(
 
     ta = []
     for batch_tst in tst_loader:
-        xs_test, ys_test, integration_times = prep_batch(batch_val, SEQ_LENGTH, IN_DIM)
+        xs_test, ys_test, integration_times = prep_batch(batch_tst, SEQ_LENGTH, IN_DIM)
         pred_ys, outs = jax.vmap(full_model)(xs_test)
 
-        num_correct = jnp.sum(pred_ys.argmax(axis=1) == ys_val)
+        num_correct = jnp.sum(pred_ys.argmax(axis=1) == ys_test)
         final_accuracy = (num_correct / len(xs_test)).item()
         ta.append(final_accuracy)
 
@@ -361,7 +349,6 @@ if __name__ == '__main__':
     else:
         print("Not pruning")
 
-
     if args.model == 'gru':
         cell_type = CellType.EqxGRU
     elif args.model == 'egru':
@@ -377,7 +364,6 @@ if __name__ == '__main__':
                        use_wandb=args.wandb,
                        dataset=args.dataset,
                        )
-    # config = ml_collections.ConfigDict(config_dict)
 
     pruner = None
     if prune:
@@ -385,38 +371,38 @@ if __name__ == '__main__':
             case 'static':
                 print("Static sparsity")
                 sparsity_config_dict = dict(
-                    algorithm = 'static_sparse',
-                    sparsity = 0.95,
+                    algorithm='static_sparse',
+                    sparsity=0.95,
                     # update_start_step = 10,  # 200 steps per epoch for smnist
                     # update_end_step = 200 * args.epochs,
                     # update_freq=10,
-                    dist_type = 'erk'
+                    dist_type='erk'
                 )
             case 'magnitude':
                 sparsity_config_dict = dict(
                     algorithm='magnitude',
                     update_freq=10,
-                    update_start_step = 10,  # 200 steps per epoch for smnist
-                    update_end_step = 200 * args.epochs,
+                    update_start_step=10,  # 200 steps per epoch for smnist
+                    update_end_step=200 * args.epochs,
                     sparsity=0.95,
                     dist_type='erk',
                 )
             case 'ste':
                 sparsity_config_dict = dict(
-                    algorithm = 'magnitude_ste',
-                    sparsity = 0.95,
-                    update_start_step = 10,  # 200 steps per epoch for smnist
-                    update_end_step = 200 * args.epochs,
-                    dist_type = 'erk'
+                    algorithm='magnitude_ste',
+                    sparsity=0.95,
+                    update_start_step=10,  # 200 steps per epoch for smnist
+                    update_end_step=200 * args.epochs,
+                    dist_type='erk'
                 )
             case 'set':
                 sparsity_config_dict = dict(
-                    algorithm = 'set',
-                    sparsity = 0.95,
-                    update_start_step = 10,  # 200 steps per epoch for smnist
-                    update_end_step = 200 * args.epochs,
+                    algorithm='set',
+                    sparsity=0.95,
+                    update_start_step=10,  # 200 steps per epoch for smnist
+                    update_end_step=200 * args.epochs,
                     update_freq=10,
-                    dist_type = 'erk'
+                    dist_type='erk'
                 )
         sparsity_config = ml_collections.ConfigDict(sparsity_config_dict)
         # sparsity_distribution = partial(jaxpruner.sparsity_distributions.uniform, sparsity=0.8)
@@ -424,9 +410,9 @@ if __name__ == '__main__':
         pruner = jaxpruner.create_updater_from_config(sparsity_config)
 
     if args.method == 'rtrl':
-        make_step=make_step_rtrl
+        make_step = make_step_rtrl
     elif args.method == 'bptt':
-        make_step=make_step_bptt
+        make_step = make_step_bptt
     else:
         raise RuntimeError(f"Unknown method {args.method}")
 
