@@ -239,17 +239,17 @@ def train(
 
     full_model = model
 
+    schedule_fn = None
     if use_learning_schedule:
         schedule_fn = optax.cosine_decay_schedule(
                 init_value=learning_rate, 
                 decay_steps=TRAIN_SIZE * epochs,
                 alpha=1e-5
                 )
+        optim = optax.adamw(schedule_fn)
     else:
-        schedule_fn = learning_rate
+        optim = optax.adamw(learning_rate)
 
-
-    optim = optax.adamw(schedule_fn)
     if clip_gradients:
         clipper = optax.clip(0.25)
         tx = optax.chain(
@@ -296,9 +296,10 @@ def train(
                 if prune:
                     data['mean_parameter_sparsity'] = jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True).get('_total_sparsity', None)
 
-                step    = opt_state.count
-                lr      = lr_schedule(step)
-                data['learning_rate'] = lr
+                if schedule_fn:
+                    step    = opt_state.count
+                    lr      = schedule_fn(step)
+                    data['learning_rate'] = lr
 
                 wandb.log(dict(train=data))
 
@@ -316,7 +317,9 @@ def train(
             va.append(acc)
 
         acc = np.mean(va)
+
         validation_accs.append(acc)
+
         if use_wandb:
             wandb.log(dict(validation=dict(epoch=epoch, step=step, accuracy=acc)))
         print(f"epoch={epoch}, step={step}, validation_accuracy={acc}")
