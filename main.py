@@ -393,6 +393,7 @@ if __name__ == '__main__':
                     sparsity=0.95,
                     update_start_step=10,  # 200 steps per epoch for smnist
                     update_end_step=200 * args.epochs,
+                    update_freq=10,
                     dist_type='erk'
                 )
             case 'set':
