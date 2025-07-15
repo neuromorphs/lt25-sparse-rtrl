@@ -245,8 +245,8 @@ class EGRUCell(Module):
 class MultiLayerCell(Module):
     cells: list[Module]
 
-    def __call__(self, inputs: Array, states: list[Array], *, key: Optional["jax.random.PRNGKey"] = None):
-        inp = inputs[0]
+    def __call__(self, input_: Array, states: list[Array], *, key: Optional["jax.random.PRNGKey"] = None):
+        inp = input_
         new_states = []
         outs = []
         for cell, state in zip(self.cells, states):
@@ -324,23 +324,23 @@ class RNN(eqx.Module):
         final_state, outs = None, None
 
         hiddens = []
-        inputs = []
+        # inputs = []
         for i, hsz in enumerate(self.hidden_size):
             if isinstance(self.multilayer_cell.cells[i], eqx.nn.GRUCell):
                 hidden = jnp.zeros((hsz,))
             else:
                 hidden = self.multilayer_cell.cells[i].init_carry()
             hiddens.append(hidden)
-            if i == 0:
-                inputs.append(input_)
-            else:
-                inputs.append(None)
+            # if i == 0:
+            #     inputs.append(input_)
+            # else:
+            #     inputs.append(None)
 
         def f(carry, inp):
             cs, os = self.multilayer_cell(inp, carry)
             return cs, os
         
-        final_cs, outs = lax.scan(f, hiddens, inputs)
+        final_cs, outs = lax.scan(f, hiddens, input_)
 
         # for cell in self.cells:
         #
