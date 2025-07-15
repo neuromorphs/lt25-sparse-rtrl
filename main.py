@@ -288,10 +288,18 @@ def train(
                 data = dict(epoch=epoch, step=step, loss=loss,
                             # state_sparsity=sparsity[0], M_sparsity=sparsity[1],
                             mean_state_sparsity=mean_state_sparsity,
-                            mean_M_sparsity=mean_M_sparsity,
-                            cum_mean_state_density=cum_mean_state_density,
-                            cum_mean_M_density=cum_mean_M_density,
-                            mean_sq_M_sparsity=jnp.mean(sparsity[1] ** 2))
+                            # mean_M_sparsity=mean_M_sparsity,
+                            # cum_mean_state_density=cum_mean_state_density,
+                            # cum_mean_M_density=cum_mean_M_density,
+                            # mean_sq_M_sparsity=jnp.mean(sparsity[1] ** 2)
+                            )
+                if prune:
+                    data['mean_parameter_sparsity'] = jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True).get('_total_sparsity', None)
+
+                step    = opt_state.count
+                lr      = lr_schedule(step)
+                data['learning_rate'] = lr
+
                 wandb.log(dict(train=data))
 
             if step % 100 == 0:
@@ -310,7 +318,7 @@ def train(
         acc = np.mean(va)
         validation_accs.append(acc)
         if use_wandb:
-            wandb.log(dict(validation=dict(step=step, accuracy=acc)))
+            wandb.log(dict(validation=dict(epoch=epoch, step=step, accuracy=acc)))
         print(f"epoch={epoch}, step={step}, validation_accuracy={acc}")
         if prune:
             print(jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True))
@@ -345,7 +353,8 @@ if __name__ == '__main__':
     argparser.add_argument('--use-learning-schedule', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
     # argparser.add_argument('--prune', action='store_true')
-    argparser.add_argument('--prune-method', type=str, choices=['set', 'static', 'ste'])
+    # STE needs pre-update
+    argparser.add_argument('--prune-method', type=str, choices=['set', 'static'])
     argparser.add_argument('--debug', action='store_true')
     argparser.add_argument('--method', type=str, choices=['rtrl', 'bptt'], default='bptt')
     argparser.add_argument('--dataset', type=str, choices=['toy', 'speech', 'smnist'], default='toy')
