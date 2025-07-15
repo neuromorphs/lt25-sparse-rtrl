@@ -204,6 +204,7 @@ def train(
         seed=5678,
         weight_sparsity=0.,
         disable_activity_sparsity=False,
+        clip_gradients=False,
         cell_type=CellType.EGRU,
         prune=False,
         pruner=None,
@@ -237,14 +238,15 @@ def train(
 
     full_model = model
 
-    # clipper = optax.clip(1.0)
-    # optim = optax.adam(learning_rate)
-    # tx = optax.chain(
-    #         clipper,
-    #         optim
-    #         )
     optim = optax.adam(learning_rate)
-    tx = optim
+    if clip_gradients:
+        clipper = optax.clip(0.25)
+        tx = optax.chain(
+                clipper,
+                optim
+                )
+    else:
+        tx = optim
     # For Jax pruner
     if prune:
         tx = pruner.wrap_optax(tx)
@@ -328,6 +330,7 @@ if __name__ == '__main__':
     argparser.add_argument('--epochs', type=int, default=10)
     argparser.add_argument('--hidden-size', type=int, action='append')
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
+    argparser.add_argument('--clip-gradients', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
     # argparser.add_argument('--prune', action='store_true')
     argparser.add_argument('--prune-method', type=str, choices=['set', 'static', 'ste'])
@@ -358,6 +361,7 @@ if __name__ == '__main__':
                        prune=prune,
                        use_wandb=args.wandb,
                        dataset=args.dataset,
+                       clip_gradients=args.clip_gradients,
                        )
     if args.wandb:
         wandb.init(project="sparse-rtrl", entity="anands", config=config_dict)
