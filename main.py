@@ -208,6 +208,7 @@ def train(
         cell_type=CellType.EGRU,
         prune=False,
         pruner=None,
+        use_learning_schedule=False,
         use_wandb=False,
         dataset='toy',
         dataset_size=10000,
@@ -238,7 +239,17 @@ def train(
 
     full_model = model
 
-    optim = optax.adamw(learning_rate)
+    if use_learning_schedule:
+        schedule_fn = optax.cosine_decay_schedule(
+                init_value=learning_rate, 
+                decay_steps=TRAIN_SIZE * epochs,
+                alpha=1e-5
+                )
+    else:
+        schedule_fn = learning_rate
+
+
+    optim = optax.adamw(schedule_fn)
     if clip_gradients:
         clipper = optax.clip(0.25)
         tx = optax.chain(
@@ -331,6 +342,7 @@ if __name__ == '__main__':
     argparser.add_argument('--hidden-size', type=int, action='append')
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--clip-gradients', action='store_true')
+    argparser.add_argument('--use-learning-schedule', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
     # argparser.add_argument('--prune', action='store_true')
     argparser.add_argument('--prune-method', type=str, choices=['set', 'static', 'ste'])
@@ -362,6 +374,7 @@ if __name__ == '__main__':
                        use_wandb=args.wandb,
                        dataset=args.dataset,
                        clip_gradients=args.clip_gradients,
+                       use_learning_schedule=args.use_learning_schedule,
                        )
     if args.wandb:
         wandb.init(project="sparse-rtrl", entity="anands", config=config_dict)
