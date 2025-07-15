@@ -242,6 +242,29 @@ class EGRUCell(Module):
         return jnp.zeros((self.hidden_size,))
 
 
+class MultiLayerCell(Module):
+    cells: list[Module]
+
+    def __call__(self, inputs: Array, states: list[Array], *, key: Optional["jax.random.PRNGKey"] = None):
+        inp = inputs[0]
+        new_states = []
+        outs = []
+        for cell, state in zip(self.cells, states):
+            o = c = None
+            if isinstance(cell, eqx.nn.GRUCell):
+                new_state = cell(inp, state)
+                o = c = new_state
+            elif isinstance(cell, EGRUCell):
+                new_state, out = cell(inp, state)
+                c, _ = out
+                o, h, _ = cell.c_to_oh(c)
+            inp = o
+            outs.append(o)
+            new_states.append(c)
+
+        return new_states, outs
+
+
 class CellType(Enum):
     RNN = 'rnn'
     EqxGRU = 'eqxgru'
@@ -249,7 +272,8 @@ class CellType(Enum):
 
 
 class RNN(eqx.Module):
-    cells: list[eqx.Module]
+    # cells: list[eqx.Module]
+    multilayer_cell: MultiLayerCell
 
     ## NOTE: Want to keep linear layer here so that the RNN class is always compatible with eqx.* RNNs
     linear: eqx.nn.Linear
@@ -276,7 +300,7 @@ class RNN(eqx.Module):
             # print(f"Initialising cell with input {in_size} and hidden size {hidden_size}")
             hidden_size = [hidden_size]
 
-        self.cells = []
+        cells = []
         for h in hidden_size:
             print(f"Initialising cell with input {in_size} and hidden size {h}")
             match cell_type:
@@ -288,44 +312,57 @@ class RNN(eqx.Module):
                     cell = eqx.nn.GRUCell(in_size, h, key=ckey, **kwargs)
                 case _:
                     raise RuntimeError(f"Unknown cell type {cell_type}")
-            self.cells.append(cell)
+            cells.append(cell)
             in_size = h
+
+        self.multilayer_cell = MultiLayerCell(cells)
 
         self.linear = eqx.nn.Linear(hidden_size[-1], out_size, key=lkey)
         self.hidden_size = hidden_size
 
     def __call__(self, input_):
         final_state, outs = None, None
-        for cell in self.cells:
-            if isinstance(cell, eqx.nn.GRUCell):
-                hidden = jnp.zeros((cell.hidden_size,))
-                def f(carry, inp):
-                    c = cell(inp, carry)
-                    return c, c
+
+        hiddens = []
+        inputs = []
+        for i, hsz in enumerate(self.hidden_size):
+            if isinstance(self.multilayer_cell.cells[i], eqx.nn.GRUCell):
+                hidden = jnp.zeros((hsz,))
             else:
-                hidden = cell.init_carry()
-                def f(carry, inp):
-                    carry, out = cell(inp, carry)
-                    return carry, out
+                hidden = self.multilayer_cell.cells[i].init_carry()
+            hiddens.append(hidden)
+            if i == 0:
+                inputs.append(input_)
+            else:
+                inputs.append(None)
 
-            os_ = None
-            if isinstance(cell, RNNCell):
-                final_state, outs = lax.scan(f, hidden, input_)
-                os_, _ = outs
-            if isinstance(cell, eqx.nn.GRUCell):
-                final_state, outs = lax.scan(f, hidden, input_)
-                os_ = outs
-            elif isinstance(cell, EGRUCell):
-                c, outs = lax.scan(f, hidden, input_)
-                # o, h, _ = cell.c_to_oh(c)
-                # final_state = h
-                cs_, _ = outs
-                os_, hs_, _ = cell.c_to_oh(cs_)
-            input_ = os_
+        def f(carry, inp):
+            cs, os = self.multilayer_cell(inp, carry)
+            return cs, os
+        
+        final_cs, outs = lax.scan(f, hiddens, inputs)
 
-        if isinstance(cell, EGRUCell):
+        # for cell in self.cells:
+        #
+        #     os_ = None
+        #     # if isinstance(cell, RNNCell):
+        #     #     final_state, outs = lax.scan(f, hidden, input_)
+        #     #     os_, _ = outs
+        #     if isinstance(cell, eqx.nn.GRUCell):
+        #         final_state, outs = lax.scan(f, hidden, input_)
+        #         os_ = outs
+        #     elif isinstance(cell, EGRUCell):
+        #         c, outs = lax.scan(f, hidden, input_)
+        #         # o, h, _ = cell.c_to_oh(c)
+        #         # final_state = h
+        #         cs_, _ = outs
+        #         os_, hs_, _ = cell.c_to_oh(cs_)
+        #     input_ = os_
+
+        last_cell = self.multilayer_cell.cells[-1]
+        if isinstance(last_cell, EGRUCell):
             alpha = 0.9
-            tr_, _ = lax.scan(lambda carry, inp: (alpha * carry + (1 - alpha) * inp, None), jnp.zeros((cell.hidden_size)), os_)
+            tr_, _ = lax.scan(lambda carry, inp: (alpha * carry + (1 - alpha) * inp, None), jnp.zeros((last_cell.hidden_size)), outs[-1])
             final_state = tr_
         pred = jax.nn.softmax(self.linear(final_state))
         return pred, outs
