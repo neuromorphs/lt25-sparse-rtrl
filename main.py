@@ -213,11 +213,6 @@ def train(
         seq_len=17,
 ):
     print(f"Seed: {seed}")
-    if use_wandb:
-        wandb.init(project="sparse-rtrl", entity="anands",
-                   config=dict(seq_len=seq_len, batch_size=batch_size, learning_rate=learning_rate, steps=steps,
-                               hidden_size=hidden_size, seed=seed, weight_sparsity=weight_sparsity,
-                               disable_activity_sparsity=disable_activity_sparsity, cell_type=cell_type.value))
 
     if dataset == 'speech':
         cache_dir = './raw_datasets/speech_commands/0.0.3/SpeechCommands/processed_data'
@@ -364,6 +359,8 @@ if __name__ == '__main__':
                        use_wandb=args.wandb,
                        dataset=args.dataset,
                        )
+    if args.wandb:
+        wandb.init(project="sparse-rtrl", entity="anands", config=config_dict)
 
     pruner = None
     if prune:
