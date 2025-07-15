@@ -238,7 +238,7 @@ def train(
 
     full_model = model
 
-    optim = optax.adam(learning_rate)
+    optim = optax.adamw(learning_rate)
     if clip_gradients:
         clipper = optax.clip(0.25)
         tx = optax.chain(
