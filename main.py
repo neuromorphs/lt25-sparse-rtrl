@@ -241,10 +241,17 @@ def train(
 
     schedule_fn = None
     if use_learning_schedule:
-        schedule_fn = optax.cosine_decay_schedule(
+        # schedule_fn = optax.cosine_decay_schedule(
+        #         init_value=learning_rate, 
+        #         decay_steps=TRAIN_SIZE * epochs,
+        #         alpha=0.
+        #         )
+        schedule_fn = optax.warmup_cosine_decay_schedule(
                 init_value=learning_rate, 
+                peak_value=2*learning_rate,
+                warmup_steps=TRAIN_SIZE,
                 decay_steps=TRAIN_SIZE * epochs,
-                alpha=1e-5
+                end_value=1e-8
                 )
         optim = optax.adamw(schedule_fn)
     else:
