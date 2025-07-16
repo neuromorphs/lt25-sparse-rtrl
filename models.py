@@ -1,5 +1,6 @@
 import math
 from enum import Enum
+from functools import partial
 from typing import Optional, Callable
 
 import equinox as eqx
@@ -11,7 +12,8 @@ import jax.random as jrandom
 from equinox import Module
 from jax import custom_jvp
 from jaxtyping import Array
-
+import aqt.jax.v2.flax.aqt_flax as aqt
+import aqt.jax.v2.config as aqt_config
 
 @custom_jvp
 def event_fn(x):
@@ -86,6 +88,37 @@ class RNNCell(Module):
     def init_carry(self):
         return jnp.zeros((self.hidden_size,))
 
+from aqt.jax.v2.aqt_dot_general import CalibrationMode
+
+fully_quantized = partial(
+    aqt_config.fully_quantized, use_stochastic_rounding=False,
+)
+
+def q_dot_maybe(lhs_bits: Optional[int], rhs_bits: Optional[int], return_cfg=False):
+    if lhs_bits is None and rhs_bits is None:
+        return jnp.dot if not return_cfg else None
+    else:
+        assert lhs_bits == rhs_bits
+        precision = (lhs_bits, rhs_bits)
+        bwd_bits = max([e for e in precision if e is not None])
+        dot_general = fully_quantized(fwd_bits=lhs_bits, bwd_bits=bwd_bits)
+        if return_cfg:
+            return dot_general
+        else:
+            return quant_dot_for_dot(dot_general)
+
+def quant_dot_for_dot(general_dot):
+    """Generate a jitted general_dot function to be used for dot products.
+    Will contract on the last dimension of a, and the first dimension of b.
+    This means that there are no batch dimensions, and all dimensions will be used
+    for calibration in the quantization."""
+    def _dot(a, b):
+        # contr_dims = ((a.ndim-1,), (1,))  # batched version (not used)
+        # batch_dims = ((0,), (0,))  # batched version (not used)
+        contr_dims = ((a.ndim-1,), (0,))
+        batch_dims = ((), ())
+        return general_dot(a, b, (contr_dims, batch_dims))
+    return jax.jit(_dot)
 
 class EGRUCell(Module):
     weight_ih: Array
@@ -94,17 +127,12 @@ class EGRUCell(Module):
     bias: Array
     recurrent_bias: Array
 
-    # mask_hh: Array = eqx.field(static=True)
     input_size: int = eqx.field(static=True)
     hidden_size: int = eqx.field(static=True)
+    quantize: bool = eqx.field(static=True)
     output_jac: bool = eqx.field(static=True)
     output_fn: Callable = eqx.field(static=True)
-
-    def c_to_oh(self, c):
-        thr = jax.lax.clamp(0., self.threshold, 1.)
-        o = self.output_fn(c - thr)
-        h = o * c
-        return o, h, thr
+    dot_general: Callable = eqx.field(static=True)
 
     def __init__(
             self,
@@ -112,12 +140,20 @@ class EGRUCell(Module):
             hidden_size: int,
             *,
             key: Optional["jax.random.PRNGKey"],
+            quantize=False,
             activity_sparse=True,
             weight_sparsity=0.,
             output_jac=False,
             **kwargs
     ):
         super().__init__(**kwargs)
+
+        self.quantize = quantize
+        if quantize:
+            print("Quantizing")
+            self.dot_general = q_dot_maybe(8, 8)
+        else:
+            self.dot_general = jnp.dot
 
         ihkey, hhkey, bkey, thkey = jrandom.split(key, 4)
         # lim = math.sqrt(1 / hidden_size)
@@ -178,7 +214,7 @@ class EGRUCell(Module):
 
         # iu, ir, ic = jnp.split(i, 3, -1)
 
-        lin_x = self.weight_ih @ input_ + self.bias
+        lin_x = self.dot_general(self.weight_ih, input_) + self.bias
         xu, xr, xc = jnp.split(lin_x, 3, -1)
 
         w_hh = self.weight_hh
@@ -192,7 +228,8 @@ class EGRUCell(Module):
             # w_hh = model.weight_hh[model.mask_hh]
             # w_hh = jnp.where(model.mask_hh, model.weight_hh, jnp.zeros_like(model.weight_hh))
             # w_hh = model.weight_hh
-            lin_h = w_hh @ h + model.recurrent_bias
+            lin_h = self.dot_general(w_hh , h) + model.recurrent_bias
+            # lin_h = w_hh @ h + model.recurrent_bias
 
             hu, hr, hc = jnp.split(lin_h, 3, -1)
             # bu, br, bc = jnp.split(model.bias, 3)
@@ -230,6 +267,16 @@ class EGRUCell(Module):
 
     def init_carry(self):
         return jnp.zeros((self.hidden_size,))
+
+    def c_to_oh(self, c):
+        thr = jax.lax.clamp(0., self.threshold, 1.)
+        o = self.output_fn(c - thr)
+        if not self.quantize:
+            h = o * c
+        else:
+            h = o
+        return o, h, thr
+
 
 
 class MultiLayerCell(Module):

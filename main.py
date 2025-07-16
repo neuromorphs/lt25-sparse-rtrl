@@ -202,6 +202,7 @@ def train(
         hidden_size=128,
         epochs=10,
         seed=5678,
+        quantize=False,
         weight_sparsity=0.,
         disable_activity_sparsity=False,
         clip_gradients=False,
@@ -230,12 +231,14 @@ def train(
     _, model_key = jrandom.split(jrandom.PRNGKey(seed), 2)
 
     if cell_type in [CellType.EqxGRU]:
-        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
+        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key,
+                    quantize=quantize)
     elif cell_type in [CellType.RNN]:
-        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
+        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key,
+                    quantize=quantize)
     else:
         model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key,
-                    weight_sparsity=weight_sparsity, activity_sparse=(not disable_activity_sparsity))
+                    weight_sparsity=weight_sparsity, activity_sparse=(not disable_activity_sparsity), quantize=quantize)
 
     full_model = model
 
@@ -361,6 +364,7 @@ if __name__ == '__main__':
     argparser.add_argument('--disable-activity-sparsity', action='store_true')
     argparser.add_argument('--clip-gradients', action='store_true')
     argparser.add_argument('--use-learning-schedule', action='store_true')
+    argparser.add_argument('--quantize', action='store_true')
     argparser.add_argument('--wandb', action='store_true')
     # argparser.add_argument('--prune', action='store_true')
     # STE needs pre-update
@@ -394,6 +398,7 @@ if __name__ == '__main__':
                        dataset=args.dataset,
                        clip_gradients=args.clip_gradients,
                        use_learning_schedule=args.use_learning_schedule,
+                       quantize=args.quantize,
                        )
     if args.wandb:
         wandb.init(project="sparse-rtrl", entity="anands", config=config_dict)

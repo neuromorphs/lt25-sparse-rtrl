@@ -27,6 +27,7 @@ dependencies = [
     "torchtext",
     "torchvision>=0.22.0",
     "tqdm",
+    "aqtp>=0.8.4",
 ]
 
 [tool.uv]
