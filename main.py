@@ -71,11 +71,8 @@ def make_step_bptt(full_model, x, y, opt_state, tx, cell_type, prune):
     full_model = eqx.combine(params, static)
 
     time_state_sparsity = None
-    if cell_type in [CellType.EqxGRU]:
-        time_state_sparsity = jnp.mean(outs == 0., axis=2)
-    elif cell_type in [CellType.EGRU]:
-        os, _, _ = full_model.multilayer_cell.cells[0].c_to_oh(outs[0])
-        time_state_sparsity = jnp.mean(os == 0., axis=2)
+    all_outs = jnp.stack(outs)
+    time_state_sparsity = jnp.mean(all_outs == 0., axis=-1)
 
     return loss, full_model, opt_state, outs, (time_state_sparsity, time_state_sparsity)
 
@@ -231,11 +228,11 @@ def train(
     _, model_key = jrandom.split(jrandom.PRNGKey(seed), 2)
 
     if cell_type in [CellType.EqxGRU]:
-        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key,
-                    quantize=quantize)
+        assert not quantize, "Quantization not supported for GRU yet"
+        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
     elif cell_type in [CellType.RNN]:
-        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key,
-                    quantize=quantize)
+        assert not quantize, "Quantization not supported for GRU yet"
+        model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key)
     else:
         model = RNN(cell_type=cell_type, in_size=IN_DIM, out_size=N_CLASSES, hidden_size=hidden_size, key=model_key,
                     weight_sparsity=weight_sparsity, activity_sparse=(not disable_activity_sparsity), quantize=quantize)
@@ -290,8 +287,8 @@ def train(
 
             err.throw()
             loss = loss.item()
+            mean_state_sparsity = jnp.mean(sparsity[0])
             if use_wandb:
-                mean_state_sparsity = jnp.mean(sparsity[0])
                 mean_M_sparsity = jnp.mean(sparsity[1])
                 cum_mean_state_density += (1 - mean_state_sparsity)
                 cum_mean_M_density += (1 - mean_M_sparsity)
@@ -314,7 +311,7 @@ def train(
                 wandb.log(dict(train=data))
 
             if step % 100 == 0:
-                print(f"epoch={epoch}, step={step}, loss={loss}")
+                print(f"epoch={epoch}, step={step}, loss={loss}, activity sparsity={mean_state_sparsity}")
 
         va = []
         for batch_val in val_loader:

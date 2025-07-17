@@ -377,5 +377,7 @@ class RNN(eqx.Module):
             tr_, _ = lax.scan(lambda carry, inp: (alpha * carry + (1 - alpha) * inp, None),
                               jnp.zeros((last_cell.hidden_size)), outs[-1])
             final_state = tr_
+        else:
+            final_state = final_cs[-1]
         pred = jax.nn.softmax(self.linear(final_state))
         return pred, outs
