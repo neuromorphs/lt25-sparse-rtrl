@@ -252,7 +252,7 @@ def train(
         schedule_fn = optax.warmup_cosine_decay_schedule(
                 init_value=learning_rate, 
                 peak_value=2*learning_rate,
-                warmup_steps=TRAIN_SIZE//batch_size * 10,
+                warmup_steps=TRAIN_SIZE//batch_size * 5,
                 decay_steps=TRAIN_SIZE//batch_size * epochs,
                 end_value=1e-8
                 )
@@ -307,7 +307,7 @@ def train(
                     data['mean_parameter_sparsity'] = jaxpruner.summarize_sparsity(full_model, only_total_sparsity=True).get('_total_sparsity', None)
 
                 if schedule_fn:
-                    step    = opt_state.count
+                    step    = opt_state[0].count
                     lr      = schedule_fn(step)
                     data['learning_rate'] = lr
 
